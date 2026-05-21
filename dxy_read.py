@@ -6,25 +6,20 @@ import time
 import random
 
 try:
-    from playwright.sync_api import sync_playwright
+    from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 except ImportError:
     print("【错误】缺少 playwright 库，请先安装。")
     exit(1)
 
 # =========================
-# 基础与接口配置
+# 基础配置
 # =========================
 TASK_URL = "https://hao.dxy.cn/plus/activity?source=livesquare"
-
-# 你抓到的核心 API 接口
 API_URL = "https://hao.dxy.cn/api/client/proxy/api/stats/client/session/task/activity/list?taskType=2&pageNo=1&pageSize=15&reset=true"
 
-# 单次运行最大阅读数量
 MAX_CLICKS = 5
-
-# 阅读页停留时间 (秒)
-READ_WAIT_MIN = 20
-READ_WAIT_MAX = 35
+READ_WAIT_MIN = 35  # 保底 35 秒，确保跨过及格线
+READ_WAIT_MAX = 42
 
 
 def parse_cookies(cookie_str: str, domain: str = ".dxy.cn") -> list:
@@ -46,38 +41,59 @@ def parse_cookies(cookie_str: str, domain: str = ".dxy.cn") -> list:
 
 
 def fetch_task_list(page):
-    """
-    【核心黑科技】直接在页面上下文中发起 fetch 请求，获取后端最真实的 JSON 数据
-    """
+    """通过接口获取底层最准确的任务状态"""
     try:
         return page.evaluate(f"""
             async () => {{
                 const res = await fetch("{API_URL}", {{
                     method: "GET",
                     credentials: "include",
-                    headers: {{
-                        "accept": "application/json, text/plain, */*"
-                    }}
+                    headers: {{ "accept": "application/json, text/plain, */*" }}
                 }});
                 return await res.json();
             }}
         """)
-    except Exception as e:
-        print(f"❌ 接口请求失败: {str(e)}")
+    except Exception:
         return None
 
 
+def get_card_title(btn) -> str:
+    """提取按钮上方卡片的标题文字"""
+    try:
+        return btn.evaluate("""node => {
+            let p = node.parentElement;
+            for(let i=0; i<10; i++) {
+                if(!p) break;
+                if(p.innerText && (p.innerText.includes("去阅读") || p.innerText.includes("完成阅读"))) {
+                    return p.innerText.split('\\n')[0]; 
+                }
+                p = p.parentElement;
+            }
+            return "未知文章";
+        }""")
+    except:
+        return "未知文章"
+
+
 def simulate_reading(read_page):
+    """
+    在新标签页中深度模拟人类阅读
+    """
     wait_time = random.randint(READ_WAIT_MIN, READ_WAIT_MAX)
-    print(f"   📖 正在认真阅读 {wait_time} 秒...")
+    print(f"   📖 正在深度模拟阅读 {wait_time} 秒...")
+    
+    # 强制将阅读标签页置于前台激活状态，防止后台失焦导致计时暂停
+    read_page.bring_to_front()
+    
     start = time.time()
     while time.time() - start < wait_time:
         try:
-            # 模拟往下翻阅文章
-            read_page.mouse.wheel(0, random.randint(300, 900))
+            # 采用 evaluate 执行原生 JS 滚动，比鼠标滚轮更可靠
+            scroll_y = random.randint(300, 700)
+            read_page.evaluate(f"window.scrollBy(0, {scroll_y})")
         except Exception:
             pass
-        time.sleep(random.uniform(2.0, 4.0))
+        time.sleep(random.uniform(2.5, 4.5))
 
 
 def run_one_account(browser, cookie_str: str, account_index: int):
@@ -91,80 +107,113 @@ def run_one_account(browser, cookie_str: str, account_index: int):
     page = context.new_page()
 
     try:
-        print(f"🌐 正在访问主页注入 Cookie...")
+        print(f"🌐 正在访问主页注入并渲染 DOM...")
         page.goto(TASK_URL, wait_until="domcontentloaded", timeout=45000)
-        time.sleep(3)
+        time.sleep(5)
 
-        # 1. 调用 API 获取任务全景图
-        print("📡 正在向服务器请求最真实的底层任务数据...")
+        # 1. API 探路：摸清今日底细
         data = fetch_task_list(page)
-        
         if not data or 'results' not in data:
-            print("❌ 未能获取到有效的接口数据，Cookie 可能过期。")
+            print("❌ 接口数据获取失败，可能 Cookie 已过期。")
             return
-
+            
         items = data['results'].get('items', [])
-        if not items:
-            print("📋 当前没有可用的阅读任务。")
-            return
+        initial_completed = len([t for t in items if t.get('userStatus') == 2])
+        print(f"📊 接口摸底：今日总任务 {len(items)} 个 | 已完成 {initial_completed} 个")
 
-        # 2. 根据 userStatus 完美分类任务
-        completed_tasks = [item for item in items if item.get('userStatus') == 2]
-        unread_tasks = [item for item in items if item.get('userStatus') == 1]
-
-        print(f"📊 接口解析成功！今日总任务: {len(items)} 个")
-        print(f"✅ 已完成: {len(completed_tasks)} 个 | ⏳ 待阅读: {len(unread_tasks)} 个")
-
-        if not unread_tasks:
+        if initial_completed >= len(items):
             print("🎉 恭喜！今天的所有阅读任务都已经做完了！")
             return
 
-        # 3. 开始执行未完成任务（限制单次最大数量）
-        tasks_to_do = unread_tasks[:MAX_CLICKS]
-        print(f"🎯 准备执行其中 {len(tasks_to_do)} 个任务 (单次上限 {MAX_CLICKS} 个)...")
+        print("-" * 35)
+        print("🎯 开始执行物理点击策略...")
 
-        for i, task in enumerate(tasks_to_do, 1):
-            title = task.get('title', '未知标题')
-            url = task.get('contentUrl', '')
+        # 2. UI 寻址与物理点击
+        buttons = page.get_by_text("去阅读", exact=True).all()
+        clicked_count = 0
 
-            print("-" * 35)
-            print(f"📍 任务 {i}/{len(tasks_to_do)}: 【{title}】")
+        for i in range(len(buttons)):
+            if clicked_count >= MAX_CLICKS:
+                break
+                
+            # 重新抓取防止 DOM 变化
+            current_btns = page.get_by_text("去阅读", exact=True).all()
+            if i >= len(current_btns):
+                break
+            btn = current_btns[i]
 
-            if not url:
-                print("   ⚠️ 该任务没有提供文章链接，跳过。")
+            if not btn.is_visible():
                 continue
 
+            # UI 过滤：避开带有已完成水印的卡片
+            is_completed = btn.evaluate("""node => {
+                let p = node.parentElement;
+                for(let i=0; i<15; i++) {
+                    if(!p) break;
+                    if(p.querySelector('img[alt="已完成水印"], img.watermark')) return true;
+                    p = p.parentElement;
+                }
+                return false;
+            }""")
+
+            if is_completed:
+                continue
+
+            title = get_card_title(btn)
+            print(f"\n📍 锁定任务: 【{title}】")
+            
             try:
-                new_page = context.new_page()
-                print("   ➡️ 获取到直达链接，正在闪现至文章页面...")
+                # 滚动到按钮位置
+                btn.scroll_into_view_if_needed()
+                time.sleep(1)
+
+                # 捕获由此产生的弹出窗口
+                with context.expect_page(timeout=8000) as popup_info:
+                    print("   🖱️ 触发原生地图级鼠标点击...")
+                    box = btn.bounding_box()
+                    if box:
+                        # 模拟真实鼠标移动和点击
+                        page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+                        time.sleep(0.3)
+                        page.mouse.down()
+                        time.sleep(0.1)
+                        page.mouse.up()
+                    else:
+                        btn.click(force=True)
+
+                new_page = popup_info.value
+                print("   ➡️ 成功捕获新文章标签页。")
                 
-                # 伪造 referer 骗过服务器，让它以为我们是从任务列表点进来的
-                new_page.goto(url, referer=TASK_URL, wait_until="domcontentloaded", timeout=45000)
-                
-                # 模拟阅读
+                # 挂机阅读
                 simulate_reading(new_page)
                 
                 new_page.close()
-                print("   ✅ 本篇文章阅读完毕，标签页已关闭。")
+                print("   ✅ 标签页已关闭，本篇流程结束。")
+                clicked_count += 1
                 
-            except Exception as e:
-                print(f"   ❌ 阅读过程出错: {str(e)}")
+                # 点击完休息一会
+                time.sleep(random.randint(4, 7))
 
-            if i < len(tasks_to_do):
-                delay = random.randint(3, 7)
-                print(f"   💤 休息 {delay} 秒防风控...")
-                time.sleep(delay)
+            except PlaywrightTimeoutError:
+                print("   ⚠️ 未捕获到新标签页，尝试检查原页面跳转...")
+                if page.url != TASK_URL:
+                    simulate_reading(page)
+                    page.goto(TASK_URL, wait_until="domcontentloaded", timeout=45000)
+                    time.sleep(4)
+                    clicked_count += 1
+                else:
+                    print("   ⚠️ 页面未跳转，跳过此异常任务。")
 
-        # 4. 再次调用 API 核对最终成果
-        print("-" * 35)
-        print("🔎 正在通过底层接口复查丁当到账情况...")
-        time.sleep(4)  # 给服务器 4 秒钟的时间把数据入库
-        final_data = fetch_task_list(page)
+        # 3. 验收成果
+        print("\n" + "-" * 35)
+        print("🔎 正在通过接口最终复查入账情况...")
+        time.sleep(5)  # 等待丁香园数据库刷新
         
+        final_data = fetch_task_list(page)
         if final_data and 'results' in final_data:
             final_items = final_data['results'].get('items', [])
             final_completed = len([t for t in final_items if t.get('userStatus') == 2])
-            newly_completed = final_completed - len(completed_tasks)
+            newly_completed = final_completed - initial_completed
             print(f"💰 成果核对：本轮实际新增完成 {newly_completed} 个任务！今日已累计完成 {final_completed}/{len(items)} 个。")
 
     except Exception as e:
@@ -192,7 +241,7 @@ def main():
                 time.sleep(random.randint(5, 10))
 
         browser.close()
-    print("🎉 所有账号今天这波阅读任务已搞定！")
+    print("🎉 所有账号今日任务流程执行完毕！")
 
 
 if __name__ == "__main__":
