@@ -1,10 +1,10 @@
 name: 丁香园全自动阅读任务
 
 on:
-  workflow_dispatch: # 保留手动执行按钮（方便测试）
+  workflow_dispatch: # 保留手动执行按钮，方便你在网页端随时测试
   schedule:
-    # 对应北京时间（UTC+8）每天上午 09:00 到晚上 23:00，每间隔 1 小时运行一次。
-    # 转换为 UTC 时间即每天的 01:00 至 15:00（每小时的第 0 分钟执行）。
+    # 每天北京时间上午 09:00 到晚上 23:00，每间隔 1 小时运行一次。
+    # (UTC 时间 01:00 至 15:00)
     - cron: '0 1-15 * * *'
 
 jobs:
@@ -25,13 +25,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install playwright
 
-      - name: 4. 安装 Playwright 浏览器内核及系统底层依赖
+      - name: 4. 安装 Playwright 浏览器内核及系统依赖
         run: |
           playwright install --with-deps chromium
 
       - name: 5. 启动自动阅读脚本
         env:
-          # 将 GitHub 仓库 Settings 中保存的 Secrets 隐式注入到脚本的环境变量中
+          # 提取你在 GitHub Secrets 中配置的多行 Cookie
           DXY_COOKIE: ${{ secrets.DXY_COOKIE }}
         run: |
           python dxy_read.py
