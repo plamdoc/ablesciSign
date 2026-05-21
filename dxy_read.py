@@ -19,7 +19,7 @@ API_URL = "https://hao.dxy.cn/api/client/proxy/api/stats/client/session/task/act
 
 MAX_CLICKS = 5
 READ_WAIT_MIN = 35  
-READ_WAIT_MAX = 42
+READ_WAIT_MAX = 45
 
 
 def parse_cookies(cookie_str: str, domain: str = ".dxy.cn") -> list:
@@ -57,35 +57,65 @@ def fetch_task_list(page):
 
 
 def get_card_title(btn) -> str:
-    """利用 task_item 容器精准提取标题"""
+    """修复标题提取逻辑，应对复杂的嵌套"""
     try:
         return btn.evaluate("""node => {
-            const card = node.closest('.task_item');
-            if (card && card.innerText) {
-                // 通常标题在文本的第一行或第二行
-                const lines = card.innerText.split('\\n').filter(line => line.trim().length > 0);
-                return lines[0]; 
+            let p = node;
+            for(let i=0; i<8; i++) {
+                if(p && p.className && typeof p.className === 'string' && p.className.includes('task_item')) {
+                    const lines = p.innerText.split('\\n').filter(l => l.trim().length > 0);
+                    // 过滤掉'任务类型'等杂乱信息，尽量取有效标题
+                    for(let line of lines) {
+                        if(line.includes("阅读文章") || line.length > 5) return line;
+                    }
+                    return lines[0]; 
+                }
+                p = p.parentElement;
             }
-            return "未知文章";
+            return "提取标题失败，但已锁定卡片";
         }""")
     except:
-        return "未知文章"
+        return "提取标题失败"
 
 
 def simulate_reading(read_page):
     wait_time = random.randint(READ_WAIT_MIN, READ_WAIT_MAX)
     print(f"   📖 正在深度模拟阅读 {wait_time} 秒...")
     
+    # 强制将页面调到最前，并注入反防挂机代码
     read_page.bring_to_front()
+    try:
+        read_page.evaluate("""
+            Object.defineProperty(document, 'visibilityState', {value: 'visible', writable: true});
+            Object.defineProperty(document, 'hidden', {value: false, writable: true});
+            window.dispatchEvent(new Event('focus'));
+        """)
+    except:
+        pass
     
     start = time.time()
+    scroll_attempts = 0
+    
     while time.time() - start < wait_time:
         try:
-            scroll_y = random.randint(300, 700)
-            read_page.evaluate(f"window.scrollBy(0, {scroll_y})")
+            scroll_attempts += 1
+            # 关键：第 3 次滚动时，直接拉到页面最底部，触发丁香园的“阅读完毕”埋点
+            if scroll_attempts == 3:
+                read_page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                print("   ⏬ 已滑动至文章最底部...")
+            else:
+                scroll_y = random.randint(400, 900)
+                read_page.evaluate(f"window.scrollBy(0, {scroll_y})")
         except Exception:
             pass
-        time.sleep(random.uniform(2.5, 4.5))
+        time.sleep(random.uniform(3.0, 5.0))
+        
+    # 读完后往回滑一点，假装意犹未尽，同时给浏览器2秒钟发送数据包的时间
+    try:
+        read_page.evaluate("window.scrollBy(0, -600)")
+    except:
+        pass
+    time.sleep(2)
 
 
 def run_one_account(browser, cookie_str: str, account_index: int):
@@ -103,7 +133,6 @@ def run_one_account(browser, cookie_str: str, account_index: int):
         page.goto(TASK_URL, wait_until="domcontentloaded", timeout=45000)
         time.sleep(5)
 
-        # 1. API 探路
         data = fetch_task_list(page)
         if not data or 'results' not in data:
             print("❌ 接口数据获取失败，可能 Cookie 已过期。")
@@ -120,88 +149,89 @@ def run_one_account(browser, cookie_str: str, account_index: int):
         print("-" * 35)
         print("🎯 开始执行物理点击策略...")
 
-        print("   ⬇️ 正在向下滚动页面以加载所有懒加载任务...")
-        for _ in range(3):
-            page.mouse.wheel(0, 1000)
-            time.sleep(1.5)
-        
-        page.evaluate("window.scrollTo(0, 0)")
-        time.sleep(1.5)
-
-        # ==========================================
-        # 【核心杀招】使用你扒出来的 class 精准定位！
-        # ==========================================
-        # 寻找 class 包含 operate-btn 且内部包含“去阅读”文本的 div
-        buttons = page.locator("div.operate-btn:has-text('去阅读')").all()
-        print(f"   👁️ DOM 扫描完毕：页面上共锁定 {len(buttons)} 个“去阅读”目标 div")
-
         clicked_count = 0
 
-        for i in range(len(buttons)):
+        # 外层加入大循环：每次完成阅读后，强制刷新页面重载 DOM
+        for loop_idx in range(MAX_CLICKS):
+            print("   ⬇️ 正在向下滚动加载卡片...")
+            for _ in range(3):
+                page.mouse.wheel(0, 1000)
+                time.sleep(1.5)
+            
+            page.evaluate("window.scrollTo(0, 0)")
+            time.sleep(1.5)
+
+            buttons = page.locator("div.operate-btn:has-text('去阅读')").all()
+            
+            found_uncompleted = False
+
+            for btn in buttons:
+                if not btn.is_visible():
+                    continue
+
+                is_completed = btn.evaluate("""node => {
+                    const card = node.closest('.task_item');
+                    if (!card) return false;
+                    return !!card.querySelector('img[alt="已完成水印"], img.watermark');
+                }""")
+
+                if is_completed:
+                    continue
+
+                # 找到未完成的了！
+                found_uncompleted = True
+                title = get_card_title(btn)
+                print(f"\n📍 锁定未完成任务: 【{title[:40]}...】")
+                
+                try:
+                    btn.scroll_into_view_if_needed()
+                    time.sleep(1.5)
+
+                    with context.expect_page(timeout=8000) as popup_info:
+                        print("   🖱️ 触发原生地图级物理点击...")
+                        box = btn.bounding_box()
+                        if box:
+                            page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+                            time.sleep(0.3)
+                            page.mouse.down()
+                            time.sleep(0.1)
+                            page.mouse.up()
+                        else:
+                            btn.click(force=True)
+
+                    new_page = popup_info.value
+                    print("   ➡️ 成功捕获新文章标签页。")
+                    
+                    simulate_reading(new_page)
+                    
+                    new_page.close()
+                    print("   ✅ 标签页已关闭，本篇流程结束。")
+                    clicked_count += 1
+                    
+                except PlaywrightTimeoutError:
+                    print("   ⚠️ 未捕获到新弹窗，检查原网页是否跳转...")
+                    if page.url != TASK_URL:
+                        simulate_reading(page)
+                        page.goto(TASK_URL, wait_until="domcontentloaded", timeout=45000)
+                        time.sleep(5)
+                        clicked_count += 1
+                    else:
+                        print("   ⚠️ 页面未跳转且无弹窗，跳过此异常任务。")
+                
+                break # 每次只点一个！点完马上退出内层循环去刷新页面
+
+            if not found_uncompleted:
+                print("\n   ✅ 页面上所有可见任务均已完成。")
+                break
+
             if clicked_count >= MAX_CLICKS:
                 break
                 
-            # 动态重新抓取，防止因为弹窗等原因导致 DOM 节点刷新失效
-            current_btns = page.locator("div.operate-btn:has-text('去阅读')").all()
-            if i >= len(current_btns):
-                break
-            btn = current_btns[i]
-
-            if not btn.is_visible():
-                continue
-
-            # UI 过滤：精准查找父级 task_item 里是否有已完成水印
-            is_completed = btn.evaluate("""node => {
-                const card = node.closest('.task_item');
-                if (!card) return false;
-                return !!card.querySelector('img[alt="已完成水印"], img.watermark');
-            }""")
-
-            title = get_card_title(btn)
-
-            if is_completed:
-                print(f"   ⏭️ 识别到水印，跳过已完成: 【{title[:20]}...】")
-                continue
-
-            print(f"\n📍 锁定未完成任务: 【{title}】")
-            
-            try:
-                # 把按钮滚动到视口中
-                btn.scroll_into_view_if_needed()
-                time.sleep(1.5)
-
-                with context.expect_page(timeout=8000) as popup_info:
-                    print("   🖱️ 触发原生地图级物理点击...")
-                    box = btn.bounding_box()
-                    if box:
-                        page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
-                        time.sleep(0.3)
-                        page.mouse.down()
-                        time.sleep(0.1)
-                        page.mouse.up()
-                    else:
-                        btn.click(force=True)
-
-                new_page = popup_info.value
-                print("   ➡️ 成功捕获新文章标签页。")
-                
-                simulate_reading(new_page)
-                
-                new_page.close()
-                print("   ✅ 标签页已关闭，本篇流程结束。")
-                clicked_count += 1
-                
-                time.sleep(random.randint(4, 7))
-
-            except PlaywrightTimeoutError:
-                print("   ⚠️ 未捕获到新弹窗，检查原网页是否跳转...")
-                if page.url != TASK_URL:
-                    simulate_reading(page)
-                    page.goto(TASK_URL, wait_until="domcontentloaded", timeout=45000)
-                    time.sleep(5)
-                    clicked_count += 1
-                else:
-                    print("   ⚠️ 页面未跳转且无弹窗，跳过此异常任务。")
+            # 【核心修复】点完一篇后，必须刷新主页，否则会重复点同一个！
+            print("   🔄 正在刷新主任务列表，同步最新水疫情报...")
+            time.sleep(3)
+            page.reload(wait_until="domcontentloaded")
+            time.sleep(5)
 
         print("\n" + "-" * 35)
         print("🔎 正在等待数据入库并复查入账情况...")
@@ -231,7 +261,12 @@ def main():
     print(f"🎉 识别到 {len(account_cookies)} 个账号配置，即将发车...")
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-setuid-sandbox'])
+        # 加入防检测参数
+        browser = p.chromium.launch(headless=True, args=[
+            '--no-sandbox', 
+            '--disable-setuid-sandbox',
+            '--disable-blink-features=AutomationControlled'
+        ])
         
         for index, cookie_str in enumerate(account_cookies, start=1):
             run_one_account(browser, cookie_str, index)
