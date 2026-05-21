@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# cron:40 7,21 * * *
+# cron:30 7 * * *
 # new Env("科研通签到")
 # coding=utf-8
 
