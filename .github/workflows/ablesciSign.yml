@@ -4,7 +4,7 @@ name: ablesci-checkin
 on:
   workflow_dispatch: #手动执行
   schedule:          # 定时任务
-    - cron: '40 13,23 * * *' #每日7点40,21点40，两个时间点执行任务
+     - cron: '30 23 * * *' # 每天北京时间/新加坡时间早上7点30执行
 jobs:
   checkin:
     runs-on: ubuntu-22.04
