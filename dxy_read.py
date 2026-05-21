@@ -21,9 +21,9 @@ READ_TASK_API = (
     "?taskType=2&pageNo=1&pageSize=15&reset=true"
 )
 
-TARGET_INDEX = 1          # 第二个任务，下标从0开始，所以第二个是1
-READ_WAIT_MIN = 18        # 阅读页最短停留时间
-READ_WAIT_MAX = 28        # 阅读页最长停留时间
+TARGET_INDEX = 1          # 第二个任务，下标从 0 开始，所以第二个是 1
+READ_WAIT_MIN = 18        # 阅读页最短停留秒数
+READ_WAIT_MAX = 30        # 阅读页最长停留秒数
 
 
 def parse_cookies(cookie_str: str, domain: str = ".dxy.cn") -> list:
@@ -52,49 +52,17 @@ def parse_cookies(cookie_str: str, domain: str = ".dxy.cn") -> list:
     return cookies
 
 
-def is_login_invalid(page) -> bool:
-    """
-    判断 Cookie 是否失效
-    """
-    try:
-        url = page.url.lower()
-        body_text = page.locator("body").inner_text(timeout=5000)
-
-        login_keywords = [
-            "登录",
-            "立即登录",
-            "手机号",
-            "验证码",
-            "账号登录",
-            "密码登录"
-        ]
-
-        if "login" in url:
-            return True
-
-        if any(word in body_text for word in login_keywords):
-            return True
-
-        return False
-
-    except Exception:
-        return False
-
-
-def to_int(value, default=None):
-    """
-    安全转换整数
-    """
+def safe_int(value, default=None):
     try:
         return int(value)
     except Exception:
         return default
 
 
-def get_read_tasks_by_api(page) -> list:
+def fetch_api_json(page, api_url: str):
     """
-    通过接口获取阅读任务列表。
-    使用 page.evaluate(fetch)，可以自动携带当前浏览器 Cookie。
+    通过浏览器页面内 fetch 请求接口。
+    这样会自动携带当前浏览器里的 Cookie。
     """
     try:
         data = page.evaluate(
@@ -110,45 +78,84 @@ def get_read_tasks_by_api(page) -> list:
                 return await res.json();
             }
             """,
-            READ_TASK_API
+            api_url
         )
-
-        error_code = data.get("errorCode")
-        message = data.get("message", "")
-
-        print(f"📡 接口返回 errorCode: {error_code}, message: {message}")
-
-        results = data.get("results") or data.get("result") or {}
-        items = results.get("items", [])
-
-        if not isinstance(items, list):
-            items = []
-
-        return items
+        return data
 
     except Exception as e:
-        print(f"❌ 获取阅读任务接口失败：{str(e)}")
+        print(f"❌ 接口请求失败：{str(e)}")
+        return None
+
+
+def check_cookie_valid_by_api(page) -> bool:
+    """
+    用接口判断 Cookie 是否有效。
+    不再通过页面里是否有“登录、验证码”等文字判断，避免误判。
+    """
+    data = fetch_api_json(page, READ_TASK_API)
+
+    if not data:
+        print("❌ Cookie 检测失败：接口无返回。")
+        return False
+
+    error_code = data.get("errorCode")
+    message = data.get("message", "")
+
+    print(f"📡 Cookie 检测接口返回：errorCode={error_code}, message={message}")
+
+    if str(error_code) == "0":
+        print("✅ 接口判断 Cookie 有效。")
+        return True
+
+    print("❌ 接口判断 Cookie 可能无效。")
+    return False
+
+
+def get_read_tasks_by_api(page) -> list:
+    """
+    通过接口获取阅读任务列表
+    """
+    data = fetch_api_json(page, READ_TASK_API)
+
+    if not data:
         return []
+
+    error_code = data.get("errorCode")
+    message = data.get("message", "")
+
+    print(f"📡 任务接口返回：errorCode={error_code}, message={message}")
+
+    if str(error_code) != "0":
+        print("❌ 任务接口返回异常。")
+        return []
+
+    results = data.get("results") or data.get("result") or {}
+    items = results.get("items", [])
+
+    if not isinstance(items, list):
+        return []
+
+    return items
 
 
 def is_task_completed_by_api(task: dict) -> bool:
     """
-    根据接口字段判断任务是否完成
+    根据接口字段判断任务是否完成。
 
-    从你截图看：
-    userStatus = 2 通常表示已完成
-    userStatus = 1 通常表示未完成
-    taskDingDang = 1 表示已获得丁当
-    taskDingDang = 0 表示未获得丁当
+    结合你截图里的数据：
+    userStatus = 2 一般表示已完成
+    userStatus = 1 一般表示未完成
+    taskDingDang = 1 一般表示已获得奖励
+    taskDingDang = 0 一般表示未获得奖励
     """
-    user_status = to_int(task.get("userStatus"), -1)
-    task_dingdang = to_int(task.get("taskDingDang"), 0)
-    dingdang_limit = to_int(task.get("dingDangLimit"), 1)
+    user_status = safe_int(task.get("userStatus"), -1)
+    task_dingdang = safe_int(task.get("taskDingDang"), 0)
+    dingdang_limit = safe_int(task.get("dingDangLimit"), 1)
 
     if user_status == 2:
         return True
 
-    if task_dingdang >= dingdang_limit and dingdang_limit > 0:
+    if dingdang_limit > 0 and task_dingdang >= dingdang_limit:
         return True
 
     return False
@@ -156,10 +163,10 @@ def is_task_completed_by_api(task: dict) -> bool:
 
 def print_task_list(items: list):
     """
-    打印任务列表，方便调试
+    打印阅读任务列表，方便你看状态
     """
     if not items:
-        print("📋 接口没有返回阅读任务。")
+        print("📋 没有获取到阅读任务。")
         return
 
     print("📋 当前阅读任务列表：")
@@ -182,16 +189,16 @@ def print_task_list(items: list):
         )
 
 
-def get_target_task_info(page):
+def get_second_task_info(page):
     """
-    获取第二个阅读任务的信息
+    获取第二个阅读任务
     """
     items = get_read_tasks_by_api(page)
     print_task_list(items)
 
     if len(items) <= TARGET_INDEX:
         print("❌ 接口返回的阅读任务不足 2 个，无法处理第二个任务。")
-        return None, items
+        return None
 
     task = items[TARGET_INDEX]
 
@@ -207,15 +214,16 @@ def get_target_task_info(page):
     print(f"userStatus：{user_status}")
     print(f"taskDingDang：{task_dingdang}")
     print(f"阅读链接：{content_url}")
-    print(f"是否完成：{'已完成' if completed else '未完成'}")
+    print(f"当前状态：{'已完成' if completed else '未完成'}")
     print("-" * 40)
 
-    return task, items
+    return task
 
 
 def is_task_completed_by_button(btn) -> bool:
     """
-    页面兜底判断：根据“去阅读”按钮向上查找任务卡片，判断是否有已完成水印
+    页面兜底判断：
+    根据“去阅读”按钮向上查找任务卡片，判断是否有已完成文字或已完成水印。
     """
     try:
         return btn.evaluate("""
@@ -249,15 +257,14 @@ def is_task_completed_by_button(btn) -> bool:
         return False
 
 
-def get_nth_visible_read_button(page, visible_index: int = 1):
+def get_second_visible_read_button(page):
     """
-    获取第 N 个可见的“去阅读”按钮。
-    visible_index 从0开始，第二个就是1。
+    获取页面上第二个可见的“去阅读”按钮
     """
     buttons = page.get_by_text("去阅读", exact=True)
     total = buttons.count()
 
-    print(f"🔍 页面共找到 {total} 个“去阅读”文本按钮。")
+    print(f"🔍 页面共找到 {total} 个“去阅读”文本。")
 
     visible_buttons = []
 
@@ -270,12 +277,12 @@ def get_nth_visible_read_button(page, visible_index: int = 1):
         except Exception:
             continue
 
-    print(f"🔍 其中可见按钮数量：{len(visible_buttons)}")
+    print(f"🔍 可见的“去阅读”按钮数量：{len(visible_buttons)}")
 
-    if len(visible_buttons) <= visible_index:
+    if len(visible_buttons) <= TARGET_INDEX:
         return None
 
-    return visible_buttons[visible_index]
+    return visible_buttons[TARGET_INDEX]
 
 
 def safe_click(locator) -> bool:
@@ -301,12 +308,12 @@ def safe_click(locator) -> bool:
         return False
 
 
-def simulate_reading(read_page, min_seconds: int = READ_WAIT_MIN, max_seconds: int = READ_WAIT_MAX):
+def simulate_reading(read_page):
     """
     模拟阅读停留和滚动
     """
-    wait_time = random.randint(min_seconds, max_seconds)
-    print(f"⏳ 阅读页停留 {wait_time} 秒，并模拟滚动...")
+    wait_time = random.randint(READ_WAIT_MIN, READ_WAIT_MAX)
+    print(f"⏳ 阅读页面停留 {wait_time} 秒，并模拟滚动...")
 
     start_time = time.time()
 
@@ -323,22 +330,21 @@ def simulate_reading(read_page, min_seconds: int = READ_WAIT_MIN, max_seconds: i
 
 def click_second_read_button(context, page) -> bool:
     """
-    点击页面上第二个“去阅读”按钮
+    点击页面上的第二个“去阅读”
     """
-    second_btn = get_nth_visible_read_button(page, TARGET_INDEX)
+    second_btn = get_second_visible_read_button(page)
 
     if second_btn is None:
         print("❌ 页面上没有找到第二个可见的“去阅读”按钮。")
         return False
 
     if is_task_completed_by_button(second_btn):
-        print("✅ 页面判断：第二个任务已经有“已完成”水印，不需要点击。")
+        print("✅ 页面判断：第二个任务已经显示已完成，不需要点击。")
         return True
 
-    print("👉 准备点击第二个“去阅读”按钮...")
+    print("👉 准备点击第二个“去阅读”按钮。")
 
     old_url = page.url
-    opened_new_page = None
 
     try:
         try:
@@ -348,25 +354,24 @@ def click_second_read_button(context, page) -> bool:
                 if not click_ok:
                     return False
 
-            opened_new_page = new_page_info.value
-
+            new_page = new_page_info.value
             print("📖 点击后打开了新的阅读页面。")
 
             try:
-                opened_new_page.wait_for_load_state("domcontentloaded", timeout=30000)
+                new_page.wait_for_load_state("domcontentloaded", timeout=30000)
             except Exception:
                 pass
 
-            simulate_reading(opened_new_page)
+            simulate_reading(new_page)
 
             try:
-                opened_new_page.close()
+                new_page.close()
                 print("✅ 新阅读页面已关闭。")
             except Exception:
                 pass
 
         except PlaywrightTimeoutError:
-            print("📌 点击后没有检测到新标签页，可能是在当前页跳转或原页面内完成。")
+            print("📌 点击后没有检测到新标签页，可能是在当前页面跳转或原页面内完成。")
 
             time.sleep(3)
 
@@ -399,10 +404,10 @@ def click_second_read_button(context, page) -> bool:
         return False
 
 
-def check_target_task_completed_after_read(page, old_task: dict = None) -> bool:
+def check_second_task_completed_after_read(page, old_task: dict = None) -> bool:
     """
     阅读后再次通过接口检查第二个任务是否完成。
-    优先用任务 id 匹配，避免刷新后列表顺序变化。
+    优先用任务 id 匹配，避免刷新后顺序变化。
     """
     print("🔄 正在刷新任务页并重新检查任务状态...")
 
@@ -419,7 +424,7 @@ def check_target_task_completed_after_read(page, old_task: dict = None) -> bool:
         print("❌ 重新获取任务列表失败。")
         return False
 
-    old_id = None
+    old_id = ""
     if old_task:
         old_id = str(old_task.get("id", ""))
 
@@ -431,9 +436,8 @@ def check_target_task_completed_after_read(page, old_task: dict = None) -> bool:
                 target_task = task
                 break
 
-    if target_task is None:
-        if len(items) > TARGET_INDEX:
-            target_task = items[TARGET_INDEX]
+    if target_task is None and len(items) > TARGET_INDEX:
+        target_task = items[TARGET_INDEX]
 
     if target_task is None:
         print("❌ 没有找到第二个任务。")
@@ -479,17 +483,17 @@ def run_one_account(browser, current_cookie: str, index: int):
         print("⏳ 等待页面渲染 6 秒...")
         time.sleep(6)
 
-        if is_login_invalid(page):
-            print("❌ 当前账号 Cookie 可能已失效，请重新抓取 DXY_COOKIE。")
+        if not check_cookie_valid_by_api(page):
+            print("❌ 当前账号 Cookie 可能无效，请重新抓取 DXY_COOKIE。")
             return
 
-        target_task, items = get_target_task_info(page)
+        second_task = get_second_task_info(page)
 
-        if target_task is None:
+        if second_task is None:
             print("❌ 未找到第二个阅读任务，本账号跳过。")
             return
 
-        if is_task_completed_by_api(target_task):
+        if is_task_completed_by_api(second_task):
             print("✅ 接口判断：第二个阅读任务已经完成，不需要点击。")
             return
 
@@ -499,7 +503,7 @@ def run_one_account(browser, current_cookie: str, index: int):
             print("❌ 第二个“去阅读”点击失败。")
             return
 
-        completed = check_target_task_completed_after_read(page, target_task)
+        completed = check_second_task_completed_after_read(page, second_task)
 
         if completed:
             print(f"🎉 账号 {index}：第二个阅读任务已完成。")
@@ -556,6 +560,5 @@ if __name__ == "__main__":
     try:
         main()
     finally:
-        # 本地双击运行时防止窗口闪退；GitHub Actions 不会卡住
         if os.environ.get("GITHUB_ACTIONS", "").lower() != "true":
             input("按回车键退出...")
