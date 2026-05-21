@@ -1,0 +1,40 @@
+name: 丁香园自动阅读任务
+
+# 触发条件配置
+on:
+  workflow_dispatch: # 【非常重要】允许你在网页上手动点击按钮触发运行，测试必备
+  schedule:
+    # 定时任务 (注意：GitHub Actions 使用的是 UTC 时间)
+    # UTC 时间比北京时间早 8 个小时。
+    # 例如：要在北京时间每天 08:30 和 20:30 运行，UTC 时间就是 00:30 和 12:30
+    - cron: '30 0,12 * * *' 
+
+jobs:
+  run-playwright-script:
+    runs-on: ubuntu-latest # 使用最新的 Ubuntu 系统
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 配置 Python 环境
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10' # 推荐使用 3.10
+
+      - name: 安装 Python 依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install playwright
+          # 如果你有额外的通知模块（如 requests），也在这里 pip install requests
+
+      - name: 安装 Playwright 浏览器内核及系统依赖
+        run: |
+          playwright install --with-deps chromium
+
+      - name: 运行自动化脚本
+        env:
+          # 从 GitHub Secrets 中读取 DXY_COOKIE，并注入到当前环境中
+          DXY_COOKIE: ${{ secrets.DXY_COOKIE }}
+        run: |
+          python dxy_read.py
