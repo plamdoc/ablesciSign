@@ -8,14 +8,10 @@ import random
 try:
     from playwright.sync_api import sync_playwright
 except ImportError:
-    print("【错误】缺少 playwright 库。请先在终端运行: ")
-    print("1. pip install playwright")
-    print("2. playwright install chromium")
+    print("【错误】缺少 playwright 库。")
     exit(1)
 
-
 def parse_cookies(cookie_str: str, domain: str = ".dxy.cn") -> list:
-    """将原生字符串形式的 Cookie 转换为 Playwright 需要的字典列表格式"""
     cookies = []
     for item in cookie_str.split(';'):
         if '=' in item:
@@ -28,14 +24,12 @@ def parse_cookies(cookie_str: str, domain: str = ".dxy.cn") -> list:
             })
     return cookies
 
-
 def main():
     cookie_env = os.environ.get('DXY_COOKIE', '')
     if not cookie_env:
-        print("\033[31m[错误] 未找到环境变量 DXY_COOKIE，请检查 GitHub Secrets 配置！\033[0m")
+        print("\033[31m[错误] 未找到环境变量 DXY_COOKIE！\033[0m")
         return
 
-    # 按换行符分割，支持多个账号
     account_cookies = [c.strip() for c in cookie_env.split('\n') if c.strip()]
     print("=" * 40)
     print(f"🎉 成功解析到 {len(account_cookies)} 个账号配置，准备开始执行...")
@@ -43,7 +37,6 @@ def main():
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-setuid-sandbox'])
         
-        # 循环执行每个账号
         for index, current_cookie in enumerate(account_cookies, start=1):
             print("-" * 40)
             print(f"🚀 开始执行 [账号 {index}] ...")
@@ -51,87 +44,82 @@ def main():
             context = browser.new_context(
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
             )
-            
             context.add_cookies(parse_cookies(current_cookie))
             page = context.new_page()
             url = "https://hao.dxy.cn/plus/activity?source=livesquare"
             
             try:
-                print(f"🌐 [账号 {index}] 正在打开页面: {url}")
+                print(f"🌐 正在打开页面: {url}")
                 page.goto(url, wait_until="networkidle", timeout=45000)
                 
-                print(f"⏳ [账号 {index}] 等待动态任务列表渲染 (5秒)...")
-                time.sleep(5) 
+                print("⏳ 等待页面和动态任务列表完全渲染 (6秒)...")
+                time.sleep(6) 
 
-                # 核心 JS 扫描和点击逻辑 (已添加最多点击 5 次的限制)
-                js_logic = """
-                () => {
-                    const allBtnNodes = [];
-                    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
-                    let node;
-                    while (node = walker.nextNode()) {
-                        if (node.nodeValue.trim() === '去阅读') {
-                            allBtnNodes.push(node.parentElement);
-                        }
-                    }
+                # ==========================================
+                # 全新逻辑：使用 Playwright 原生定位器和物理点击
+                # ==========================================
+                
+                # 1. 精准抓取页面上所有文本就是“去阅读”的元素
+                buttons = page.get_by_text("去阅读", exact=True).all()
+                
+                if not buttons:
+                    print("📋 页面未找到任何“去阅读”按钮。")
+                    continue
 
-                    if (allBtnNodes.length === 0) return { clicked: 0, skipped: 0, msg: "页面未找到任何“去阅读”按钮" };
+                clicked_count = 0
+                skip_count = 0
+                MAX_CLICKS = 5
 
-                    let clickedCount = 0;
-                    let skipCount = 0;
-                    const MAX_CLICKS = 5; // 【新增】设置单次最大点击数量
+                for btn in buttons:
+                    if clicked_count >= MAX_CLICKS:
+                        break
+                        
+                    # 确保按钮是实际可见的
+                    if not btn.is_visible():
+                        continue
 
-                    // 使用 for...of 循环代替 forEach，以便可以使用 break 中断循环
-                    for (let btnEl of allBtnNodes) {
-                        let taskCard = btnEl;
-                        let parent = btnEl.parentElement;
-
-                        while(parent) {
-                            let containsCount = 0;
-                            for(let b of allBtnNodes) {
-                                if (parent.contains(b)) containsCount++;
+                    # 2. 判断所属任务卡片是否已完成 (向上查找 8 层父节点提取文本)
+                    is_completed = btn.evaluate("""(node) => {
+                        let parent = node.parentElement;
+                        for(let i=0; i<8; i++) {
+                            if(!parent) break;
+                            const text = parent.innerText || "";
+                            if(text.includes('已完成') || text.includes('finish')) {
+                                return true;
                             }
-                            if (containsCount > 1) break;
-                            taskCard = parent;
                             parent = parent.parentElement;
-                            if (taskCard.tagName === 'BODY' || taskCard.tagName === 'HTML') break;
                         }
+                        return false;
+                    }""")
 
-                        const htmlStr = taskCard.innerHTML.toLowerCase();
-                        const textStr = taskCard.textContent || '';
-                        const isCompleted = textStr.includes('已完成') || htmlStr.includes('已完成') || htmlStr.includes('finish');
+                    # 3. 物理点击
+                    if not is_completed:
+                        try:
+                            print(f"  👉 发现未完成任务，正在执行真实的鼠标点击...")
+                            # force=True 确保无视可能存在的透明遮罩层强行点击
+                            btn.click(force=True)
+                            clicked_count += 1
+                            
+                            # 【关键】真实点击通常会打开新标签页，这里必须停顿等待新页面加载并记录数据
+                            time.sleep(4) 
+                        except Exception as e:
+                            print(f"  ❌ 点击失败: {str(e)}")
+                    else:
+                        skip_count += 1
 
-                        if (!isCompleted) {
-                            // 【新增】如果已经点击了 5 个，直接跳出循环，不再点剩下的
-                            if (clickedCount >= MAX_CLICKS) {
-                                break; 
-                            }
-                            btnEl.click();
-                            clickedCount++;
-                        } else {
-                            skipCount++;
-                        }
-                    }
-
-                    return { clicked: clickedCount, skipped: skipCount, msg: "扫描完成" };
-                }
-                """
+                print(f"✅ [账号 {index}] 本轮成功物理点击了 {clicked_count} 个任务 (上限5个)。跳过了 {skip_count} 个已完成。")
                 
-                result = page.evaluate(js_logic)
-                print(f"📋 [账号 {index}] 扫描结果: {result['msg']}")
-                print(f"✅ [账号 {index}] 成功点击了 {result['clicked']} 个未完成任务 (单次上限5个)，智能跳过了 {result['skipped']} 个已完成任务。")
-                
-                if result['clicked'] > 0:
-                    print(f"⏳ [账号 {index}] 正在保持浏览器存活 15 秒，确保阅读数据正常上报...")
-                    time.sleep(15)
+                if clicked_count > 0:
+                    print("⏳ 额外保持浏览器存活 10 秒，确保底层阅读接口调用完成...")
+                    time.sleep(10)
                 
             except Exception as e:
-                print(f"❌ [账号 {index}] 运行中发生异常错误: {str(e)}")
+                print(f"❌ [账号 {index}] 运行发生异常: {str(e)}")
             finally:
                 context.close()
                 if index < len(account_cookies):
                     delay = random.randint(3, 8)
-                    print(f"💤 账号切换中，防风控休息 {delay} 秒...")
+                    print(f"💤 账号切换中，休息 {delay} 秒...")
                     time.sleep(delay)
 
         browser.close()
