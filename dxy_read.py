@@ -4,6 +4,7 @@
 import os
 import time
 import random
+import re
 
 try:
     from playwright.sync_api import sync_playwright
@@ -17,6 +18,10 @@ except ImportError:
 TASK_URL = "https://hao.dxy.cn/plus/activity?source=livesquare"
 API_URL = "https://hao.dxy.cn/api/client/proxy/api/stats/client/session/task/activity/list?taskType=2&pageNo=1&pageSize=15&reset=true"
 
+MAX_CLICKS = 5
+READ_WAIT_MIN = 45
+READ_WAIT_MAX = 55
+
 
 def parse_cookies(cookie_str: str, domain: str = ".dxy.cn") -> list:
     cookies = []
@@ -26,13 +31,12 @@ def parse_cookies(cookie_str: str, domain: str = ".dxy.cn") -> list:
         name, value = item.split("=", 1)
         cookies.append({
             "name": name.strip(), "value": value.strip(),
-            "domain": domain, "path": "/",
-            "secure": True, "sameSite": "Lax"
+            "domain": domain, "path": "/", "secure": True, "sameSite": "Lax"
         })
     return cookies
 
 
-def fetch_task_list(page):
+def fetch_api_data(page):
     try:
         return page.evaluate(f"""
             async () => {{
@@ -47,156 +51,118 @@ def fetch_task_list(page):
         return None
 
 
-def get_api_task_status(page):
-    data = fetch_task_list(page)
-    if not data or "results" not in data: return 0, 0
+def get_task_status(page):
+    data = fetch_api_data(page)
+    if not data or "results" not in data: return 0, 0, []
     items = data.get("results", {}).get("items", [])
-    if not isinstance(items, list): return 0, 0
-    total = len(items)
-    completed = len([item for item in items if item.get("userStatus") == 2])
-    return completed, total
-
-
-def wait_and_load_page(page):
-    print(f"🌐 正在打开任务页：{TASK_URL}")
-    page.goto(TASK_URL, wait_until="domcontentloaded", timeout=60000)
-    print("⏳ 等待页面渲染 6 秒...")
-    time.sleep(6)
     
-    print("⬇️ 正在向下滚动页面，加载完整任务列表...")
+    total = len(items)
+    completed = len([t for t in items if t.get("userStatus") == 2])
+    # 提取所有未完成的任务列表
+    uncompleted_tasks = [t for t in items if t.get("userStatus") == 1]
+    
+    return completed, total, uncompleted_tasks
+
+
+def simulate_reading(read_page):
+    wait_time = random.randint(READ_WAIT_MIN, READ_WAIT_MAX)
+    print(f"   📖 正在深度挂机阅读 {wait_time} 秒...")
+    
     try:
-        for _ in range(3):
-            page.mouse.wheel(0, 1000)
-            time.sleep(1)
-        page.evaluate("window.scrollTo(0, 0)")
-        time.sleep(2)
+        read_page.bring_to_front()
+        # 欺骗浏览器前台状态，防止后台失焦导致计时器暂停
+        read_page.evaluate("""
+            Object.defineProperty(document, 'visibilityState', {value: 'visible', writable: true});
+            Object.defineProperty(document, 'hidden', {value: false, writable: true});
+        """)
     except: pass
 
+    start_time = time.time()
+    scroll_count = 0
 
-def execute_tampermonkey_script(page):
-    """
-    【核心变更】完美移植了用户提供的油猴核心逻辑！
-    利用 TreeWalker 精准找词，利用 contains 锁定卡片，利用底层 el.click() 确保百分百命中。
-    """
-    js_code = """
-    () => {
-        const allBtnNodes = [];
-        
-        // 1. 穿透查找页面上所有纯文本为“去阅读”的节点
-        const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
-        let node;
-        while (node = walker.nextNode()) {
-            if (node.nodeValue.trim() === '去阅读') {
-                allBtnNodes.push(node.parentElement);
-            }
-        }
-
-        if (allBtnNodes.length === 0) {
-            return { clicked: 0, skipped: 0, msg: "未找到去阅读按钮" };
-        }
-
-        const nodesToClick = [];
-        let skipCount = 0;
-
-        // 2. 遍历这些按钮，判断它们所在的卡片是否已经完成
-        allBtnNodes.forEach(btnEl => {
-            let taskCard = btnEl;
-            let parent = btnEl.parentElement;
-
-            while(parent) {
-                let containsCount = 0;
-                for(let b of allBtnNodes) {
-                    if (parent.contains(b)) containsCount++;
-                }
-                if (containsCount > 1) {
-                    break;
-                }
-                taskCard = parent;
-                parent = parent.parentElement;
-                if (taskCard.tagName === 'BODY' || taskCard.tagName === 'HTML') break;
-            }
-
-            // 3. 在这个独立卡片内检查是否包含完成标志
-            const htmlStr = taskCard.innerHTML.toLowerCase();
-            const textStr = taskCard.textContent || '';
-
-            const isCompleted = textStr.includes('已完成') ||
-                                htmlStr.includes('已完成') ||
-                                htmlStr.includes('finish') ||
-                                htmlStr.includes('complete');
-
-            if (!isCompleted) {
-                nodesToClick.push(btnEl);
-            } else {
-                skipCount++;
-            }
-        });
-
-        // 4. 执行点击 (限制单次最多点 5 个防风控)
-        let clickedCount = 0;
-        nodesToClick.slice(0, 5).forEach(el => {
-            el.click();
-            clickedCount++;
-        });
-
-        return { clicked: clickedCount, skipped: skipCount, msg: "success" };
-    }
-    """
-    return page.evaluate(js_code)
-
-
-def handle_opened_pages(context, main_page):
-    """
-    接管油猴点击后弹出的所有新标签页，执行批量挂机阅读
-    """
-    print("⏳ 等待 4 秒，让浏览器弹出并加载新标签页...")
-    time.sleep(4)
-    
-    # 筛选出所有新打开的页面
-    new_pages = [p for p in context.pages if p != main_page]
-    
-    if not new_pages:
-        print("   ⚠️ 警告：执行了点击，但没有产生新标签页。")
-        if main_page.url != TASK_URL:
-            print("   ➡️ 原页面发生了跳转，将在原页面挂机阅读 40 秒...")
-            for i in range(3):
-                time.sleep(13)
-                main_page.evaluate("window.scrollBy(0, 500)")
-            main_page.goto(TASK_URL, wait_until="domcontentloaded", timeout=45000)
-        return
-
-    print(f"   ➡️ 成功捕获到 {len(new_pages)} 个新打开的文章标签页！开始多线程并行挂机...")
-
-    # 第一步：给所有新页面注入防挂机代码
-    for p in new_pages:
+    while time.time() - start_time < wait_time:
         try:
-            p.evaluate("""
-                Object.defineProperty(document, 'visibilityState', {value: 'visible', writable: true});
-                Object.defineProperty(document, 'hidden', {value: false, writable: true});
-            """)
-            p.evaluate("window.scrollBy(0, 400)")
+            scroll_count += 1
+            if scroll_count == 3:
+                read_page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                print("   ⬇️ 已滑动至文章最底部，触发完成判定...")
+            else:
+                read_page.evaluate(f"window.scrollBy(0, {random.randint(400, 800)})")
+        except: pass
+        time.sleep(random.uniform(4.0, 6.0))
+
+    print("   ✅ 阅读停留完成。")
+
+
+def process_task(context, page, task):
+    """
+    分离战术：JS 触发前端埋点信号 -> Python 手动跳转真实链接阅读
+    """
+    title = task.get("title", "")
+    url = task.get("contentUrl", "")
+    
+    if not url:
+        print(f"   ⚠️ 任务【{title[:15]}...】缺少有效文章链接，跳过。")
+        return False
+
+    print(f"\n📍 锁定未完成任务: 【{title}】")
+    
+    # 1. 提取核心搜索词 (去除多余字符，保留汉字字母，取前15位)
+    clean_title = re.sub(r'[^\w\u4e00-\u9fa5]', '', title.replace("阅读文章", ""))
+    search_str = clean_title[:15]
+
+    # 2. 注入 JS：精准定位按钮并触发点击埋点 (屏蔽弹窗防止拦截报错)
+    js_clicked = page.evaluate("""
+        (searchStr) => {
+            // 劫持弹窗，我们不需要它弹，只需要它发埋点信号
+            window.open = function() { return null; };
+            
+            const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
+            const allBtnNodes = [];
+            let node;
+            while (node = walker.nextNode()) {
+                if (node.nodeValue.trim() === '去阅读') {
+                    allBtnNodes.push(node.parentElement);
+                }
+            }
+            
+            for (let btn of allBtnNodes) {
+                let p = btn;
+                for (let i = 0; i < 15; i++) {
+                    if (!p) break;
+                    let text = (p.innerText || "").replace(/[^a-zA-Z0-9\u4e00-\u9fa5]/g, '');
+                    if (text.includes(searchStr)) {
+                        btn.click();
+                        // 兜底连击
+                        if (btn.firstElementChild) btn.firstElementChild.click();
+                        return true;
+                    }
+                    p = p.parentElement;
+                }
+            }
+            return false;
+        }
+    """, search_str)
+
+    if js_clicked:
+        print("   🔫 JS 信号枪已发射，成功触发前端统计。")
+    else:
+        print("   ⚠️ UI 层未找到按钮，直接强制进入文章...")
+
+    # 3. Python 开启传送门：手动接管新标签页跳往文章
+    print("   ➡️ 开启传送门，跳往文章真实链接...")
+    new_page = context.new_page()
+    try:
+        # 伪造 Referer 欺骗服务器是从主页跳过来的
+        new_page.goto(url, referer=TASK_URL, wait_until="domcontentloaded", timeout=45000)
+        simulate_reading(new_page)
+    except Exception as e:
+        print(f"   ❌ 阅读过程发生异常: {str(e)}")
+    finally:
+        try: new_page.close()
         except: pass
 
-    # 第二步：挂机循环，每 15 秒全部滑动一次，持续 45 秒
-    for step in range(1, 4):
-        print(f"   📖 正在认真阅读中... (第 {step}/3 阶段)")
-        time.sleep(15)
-        for p in new_pages:
-            try: p.evaluate(f"window.scrollBy(0, {random.randint(400, 800)})")
-            except: pass
-
-    # 第三步：划到底部，触发最终统计，然后关闭
-    print("   ⏬ 划至所有文章底部，准备关闭标签页...")
-    for p in new_pages:
-        try: p.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-        except: pass
-    time.sleep(3)
-
-    for p in new_pages:
-        try: p.close()
-        except: pass
-        
-    print("   ✅ 所有文章阅读完毕并关闭。")
+    return True
 
 
 def run_one_account(browser, cookie_str: str, account_index: int):
@@ -211,45 +177,53 @@ def run_one_account(browser, cookie_str: str, account_index: int):
     page = context.new_page()
 
     try:
-        wait_and_load_page(page)
+        print(f"🌐 正在打开任务主页...")
+        page.goto(TASK_URL, wait_until="domcontentloaded", timeout=60000)
+        time.sleep(6)
 
-        initial_completed, total = get_api_task_status(page)
-        print(f"📊 接口摸底：今日总任务 {total} 个 | 已完成 {initial_completed} 个")
+        # 暴力滚动把所有懒加载数据刷出来
+        print("⬇️ 正在向下滚动加载完整卡片列表...")
+        for _ in range(4):
+            page.mouse.wheel(0, 1000)
+            time.sleep(1)
+        page.evaluate("window.scrollTo(0, 0)")
+        time.sleep(2)
+
+        # 直接从 API 获取真相
+        initial_completed, total, uncompleted_tasks = get_task_status(page)
+        print(f"📊 接口真相：今日总任务 {total} 个 | 已完成 {initial_completed} 个")
 
         if total > 0 and initial_completed >= total:
-            print("🎉 今日阅读任务已全部完成。")
+            print("🎉 今日阅读任务已全部完成，无需执行。")
             return
 
-        print("\n" + "-" * 40)
-        print("🎯 开始执行原生 JS (油猴同款) 扫描与点击...")
-        
-        # 1. 直接触发脚本
-        result = execute_tampermonkey_script(page)
-        clicked = result.get('clicked', 0)
-        skipped = result.get('skipped', 0)
-        
-        print(f"📋 脚本反馈：智能跳过 {skipped} 个已完成，成功点击了 {clicked} 个新任务！")
-        
-        if clicked > 0:
-            # 2. 批量处理刚刚点击出来的所有标签页
-            handle_opened_pages(context, page)
-        else:
-            print("   ⚠️ 没有可点击的任务。")
+        if not uncompleted_tasks:
+            print("⚠️ 没有获取到待阅读的任务列表。")
+            return
+
+        # 取前 5 个未完成的任务进行执行
+        tasks_to_do = uncompleted_tasks[:MAX_CLICKS]
+        print(f"🎯 提取出 {len(tasks_to_do)} 个未读任务，准备执行阅读流程...")
+
+        clicked_count = 0
+        for task in tasks_to_do:
+            if process_task(context, page, task):
+                clicked_count += 1
+            time.sleep(random.randint(4, 7))  # 任务之间的安全间隔
 
         print("\n" + "-" * 40)
-        print("🔎 正在刷新页面并复查最终入账情况...")
+        print("🔄 正在刷新页面，同步最新积分数据...")
         try:
             page.goto(TASK_URL, wait_until="domcontentloaded", timeout=60000)
-            time.sleep(5)
+            time.sleep(6)
         except: pass
         
-        final_completed, final_total = get_api_task_status(page)
+        final_completed, final_total, _ = get_task_status(page)
         newly_completed = final_completed - initial_completed
-
         print(f"💰 成果核对：本轮新增完成 {newly_completed} 个任务，今日累计完成 {final_completed}/{final_total} 个。")
 
     except Exception as e:
-        print(f"❌ 账号 {account_index} 执行异常：{str(e)}")
+        print(f"❌ 账号 {account_index} 执行发生严重异常：{str(e)}")
     finally:
         context.close()
 
@@ -262,29 +236,22 @@ def main():
     
     account_cookies = [c.strip() for c in cookie_env.splitlines() if c.strip()]
     print("=" * 50)
-    print(f"🎉 识别到 {len(account_cookies)} 个账号配置。")
+    print(f"🎉 成功识别到 {len(account_cookies)} 个账号配置。")
 
     with sync_playwright() as p:
-        # 【极其关键】：一定要加上 --disable-popup-blocking，否则你的油猴脚本在云端点不开新标签页！
-        browser = p.chromium.launch(
-            headless=True, 
-            args=[
-                '--no-sandbox', 
-                '--disable-setuid-sandbox',
-                '--disable-popup-blocking'  
-            ]
-        )
+        browser = p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-setuid-sandbox'])
         
         for index, cookie_str in enumerate(account_cookies, start=1):
             run_one_account(browser, cookie_str, index)
             if index < len(account_cookies):
                 time.sleep(random.randint(5, 10))
-        
+                
         browser.close()
         
     print("=" * 50)
-    print("🎉 所有账号任务流程执行完毕。")
+    print("🎉 所有账号打卡流程全部执行完毕。")
 
 if __name__ == "__main__":
+    # 定时任务随机错峰启动
     time.sleep(random.randint(1, 10))
     main()
