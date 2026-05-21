@@ -6,126 +6,556 @@ import time
 import random
 
 try:
-    from playwright.sync_api import sync_playwright
+    from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 except ImportError:
     print("【错误】缺少 playwright 库。")
+    print("请先执行：pip install playwright")
+    print("然后执行：playwright install chromium")
     exit(1)
 
+
+TASK_URL = "https://hao.dxy.cn/plus/activity?source=livesquare"
+
+READ_TASK_API = (
+    "https://hao.dxy.cn/api/client/proxy/api/stats/client/session/task/activity/list"
+    "?taskType=2&pageNo=1&pageSize=15&reset=true"
+)
+
+TARGET_INDEX = 1          # 第二个任务，下标从0开始，所以第二个是1
+READ_WAIT_MIN = 18        # 阅读页最短停留时间
+READ_WAIT_MAX = 28        # 阅读页最长停留时间
+
+
 def parse_cookies(cookie_str: str, domain: str = ".dxy.cn") -> list:
+    """
+    将浏览器复制出来的 Cookie 字符串转换为 Playwright 可用格式
+    """
     cookies = []
-    for item in cookie_str.split(';'):
-        if '=' in item:
-            name, value = item.strip().split('=', 1)
-            cookies.append({
-                'name': name,
-                'value': value,
-                'domain': domain,
-                'path': '/'
-            })
+
+    for item in cookie_str.split(";"):
+        item = item.strip()
+
+        if not item or "=" not in item:
+            continue
+
+        name, value = item.split("=", 1)
+
+        cookies.append({
+            "name": name.strip(),
+            "value": value.strip(),
+            "domain": domain,
+            "path": "/",
+            "secure": True,
+            "sameSite": "Lax"
+        })
+
     return cookies
 
-def main():
-    cookie_env = os.environ.get('DXY_COOKIE', '')
-    if not cookie_env:
-        print("\033[31m[错误] 未找到环境变量 DXY_COOKIE！\033[0m")
+
+def is_login_invalid(page) -> bool:
+    """
+    判断 Cookie 是否失效
+    """
+    try:
+        url = page.url.lower()
+        body_text = page.locator("body").inner_text(timeout=5000)
+
+        login_keywords = [
+            "登录",
+            "立即登录",
+            "手机号",
+            "验证码",
+            "账号登录",
+            "密码登录"
+        ]
+
+        if "login" in url:
+            return True
+
+        if any(word in body_text for word in login_keywords):
+            return True
+
+        return False
+
+    except Exception:
+        return False
+
+
+def to_int(value, default=None):
+    """
+    安全转换整数
+    """
+    try:
+        return int(value)
+    except Exception:
+        return default
+
+
+def get_read_tasks_by_api(page) -> list:
+    """
+    通过接口获取阅读任务列表。
+    使用 page.evaluate(fetch)，可以自动携带当前浏览器 Cookie。
+    """
+    try:
+        data = page.evaluate(
+            """
+            async (apiUrl) => {
+                const res = await fetch(apiUrl, {
+                    method: "GET",
+                    credentials: "include",
+                    headers: {
+                        "accept": "application/json, text/plain, */*"
+                    }
+                });
+                return await res.json();
+            }
+            """,
+            READ_TASK_API
+        )
+
+        error_code = data.get("errorCode")
+        message = data.get("message", "")
+
+        print(f"📡 接口返回 errorCode: {error_code}, message: {message}")
+
+        results = data.get("results") or data.get("result") or {}
+        items = results.get("items", [])
+
+        if not isinstance(items, list):
+            items = []
+
+        return items
+
+    except Exception as e:
+        print(f"❌ 获取阅读任务接口失败：{str(e)}")
+        return []
+
+
+def is_task_completed_by_api(task: dict) -> bool:
+    """
+    根据接口字段判断任务是否完成
+
+    从你截图看：
+    userStatus = 2 通常表示已完成
+    userStatus = 1 通常表示未完成
+    taskDingDang = 1 表示已获得丁当
+    taskDingDang = 0 表示未获得丁当
+    """
+    user_status = to_int(task.get("userStatus"), -1)
+    task_dingdang = to_int(task.get("taskDingDang"), 0)
+    dingdang_limit = to_int(task.get("dingDangLimit"), 1)
+
+    if user_status == 2:
+        return True
+
+    if task_dingdang >= dingdang_limit and dingdang_limit > 0:
+        return True
+
+    return False
+
+
+def print_task_list(items: list):
+    """
+    打印任务列表，方便调试
+    """
+    if not items:
+        print("📋 接口没有返回阅读任务。")
         return
 
-    account_cookies = [c.strip() for c in cookie_env.split('\n') if c.strip()]
+    print("📋 当前阅读任务列表：")
+
+    for i, task in enumerate(items, start=1):
+        title = task.get("title", "")
+        user_status = task.get("userStatus")
+        task_dingdang = task.get("taskDingDang")
+        button_title = task.get("buttonTitle", "")
+        completed = is_task_completed_by_api(task)
+
+        status_text = "已完成" if completed else "未完成"
+
+        print(
+            f"  {i}. {status_text} | "
+            f"userStatus={user_status} | "
+            f"taskDingDang={task_dingdang} | "
+            f"button={button_title} | "
+            f"{title}"
+        )
+
+
+def get_target_task_info(page):
+    """
+    获取第二个阅读任务的信息
+    """
+    items = get_read_tasks_by_api(page)
+    print_task_list(items)
+
+    if len(items) <= TARGET_INDEX:
+        print("❌ 接口返回的阅读任务不足 2 个，无法处理第二个任务。")
+        return None, items
+
+    task = items[TARGET_INDEX]
+
+    title = task.get("title", "")
+    content_url = task.get("contentUrl", "")
+    user_status = task.get("userStatus")
+    task_dingdang = task.get("taskDingDang")
+    completed = is_task_completed_by_api(task)
+
+    print("-" * 40)
+    print("🎯 第二个阅读任务信息：")
+    print(f"标题：{title}")
+    print(f"userStatus：{user_status}")
+    print(f"taskDingDang：{task_dingdang}")
+    print(f"阅读链接：{content_url}")
+    print(f"是否完成：{'已完成' if completed else '未完成'}")
+    print("-" * 40)
+
+    return task, items
+
+
+def is_task_completed_by_button(btn) -> bool:
+    """
+    页面兜底判断：根据“去阅读”按钮向上查找任务卡片，判断是否有已完成水印
+    """
+    try:
+        return btn.evaluate("""
+        (node) => {
+            let parent = node.parentElement;
+
+            for (let i = 0; i < 12; i++) {
+                if (!parent) break;
+
+                const text = parent.innerText || "";
+
+                if (text.includes("已完成")) {
+                    return true;
+                }
+
+                const watermark1 = parent.querySelector('img.watermark[alt="已完成水印"]');
+                const watermark2 = parent.querySelector('img[alt="已完成水印"]');
+                const watermark3 = parent.querySelector('.watermark');
+
+                if (watermark1 || watermark2 || watermark3) {
+                    return true;
+                }
+
+                parent = parent.parentElement;
+            }
+
+            return false;
+        }
+        """)
+    except Exception:
+        return False
+
+
+def get_nth_visible_read_button(page, visible_index: int = 1):
+    """
+    获取第 N 个可见的“去阅读”按钮。
+    visible_index 从0开始，第二个就是1。
+    """
+    buttons = page.get_by_text("去阅读", exact=True)
+    total = buttons.count()
+
+    print(f"🔍 页面共找到 {total} 个“去阅读”文本按钮。")
+
+    visible_buttons = []
+
+    for i in range(total):
+        btn = buttons.nth(i)
+
+        try:
+            if btn.is_visible(timeout=2000):
+                visible_buttons.append(btn)
+        except Exception:
+            continue
+
+    print(f"🔍 其中可见按钮数量：{len(visible_buttons)}")
+
+    if len(visible_buttons) <= visible_index:
+        return None
+
+    return visible_buttons[visible_index]
+
+
+def safe_click(locator) -> bool:
+    """
+    优先普通点击，失败后强制点击
+    """
+    try:
+        locator.scroll_into_view_if_needed(timeout=5000)
+    except Exception:
+        pass
+
+    try:
+        locator.click(timeout=10000)
+        return True
+    except Exception as e:
+        print(f"⚠️ 普通点击失败，尝试强制点击：{str(e)}")
+
+    try:
+        locator.click(force=True, timeout=10000)
+        return True
+    except Exception as e:
+        print(f"❌ 强制点击也失败：{str(e)}")
+        return False
+
+
+def simulate_reading(read_page, min_seconds: int = READ_WAIT_MIN, max_seconds: int = READ_WAIT_MAX):
+    """
+    模拟阅读停留和滚动
+    """
+    wait_time = random.randint(min_seconds, max_seconds)
+    print(f"⏳ 阅读页停留 {wait_time} 秒，并模拟滚动...")
+
+    start_time = time.time()
+
+    while time.time() - start_time < wait_time:
+        try:
+            read_page.mouse.wheel(0, random.randint(400, 900))
+        except Exception:
+            pass
+
+        time.sleep(random.uniform(2.0, 4.0))
+
+    print("✅ 阅读停留完成。")
+
+
+def click_second_read_button(context, page) -> bool:
+    """
+    点击页面上第二个“去阅读”按钮
+    """
+    second_btn = get_nth_visible_read_button(page, TARGET_INDEX)
+
+    if second_btn is None:
+        print("❌ 页面上没有找到第二个可见的“去阅读”按钮。")
+        return False
+
+    if is_task_completed_by_button(second_btn):
+        print("✅ 页面判断：第二个任务已经有“已完成”水印，不需要点击。")
+        return True
+
+    print("👉 准备点击第二个“去阅读”按钮...")
+
+    old_url = page.url
+    opened_new_page = None
+
+    try:
+        try:
+            with context.expect_page(timeout=6000) as new_page_info:
+                click_ok = safe_click(second_btn)
+
+                if not click_ok:
+                    return False
+
+            opened_new_page = new_page_info.value
+
+            print("📖 点击后打开了新的阅读页面。")
+
+            try:
+                opened_new_page.wait_for_load_state("domcontentloaded", timeout=30000)
+            except Exception:
+                pass
+
+            simulate_reading(opened_new_page)
+
+            try:
+                opened_new_page.close()
+                print("✅ 新阅读页面已关闭。")
+            except Exception:
+                pass
+
+        except PlaywrightTimeoutError:
+            print("📌 点击后没有检测到新标签页，可能是在当前页跳转或原页面内完成。")
+
+            time.sleep(3)
+
+            if page.url != old_url:
+                print(f"📖 当前页面已跳转到阅读页：{page.url}")
+
+                try:
+                    page.wait_for_load_state("domcontentloaded", timeout=30000)
+                except Exception:
+                    pass
+
+                simulate_reading(page)
+
+                print("🔙 返回任务页。")
+                try:
+                    page.goto(TASK_URL, wait_until="domcontentloaded", timeout=45000)
+                except Exception:
+                    try:
+                        page.go_back(wait_until="domcontentloaded", timeout=30000)
+                    except Exception:
+                        pass
+            else:
+                print("📌 当前页面没有明显跳转，等待任务状态同步。")
+                time.sleep(random.randint(12, 18))
+
+        return True
+
+    except Exception as e:
+        print(f"❌ 点击第二个“去阅读”失败：{str(e)}")
+        return False
+
+
+def check_target_task_completed_after_read(page, old_task: dict = None) -> bool:
+    """
+    阅读后再次通过接口检查第二个任务是否完成。
+    优先用任务 id 匹配，避免刷新后列表顺序变化。
+    """
+    print("🔄 正在刷新任务页并重新检查任务状态...")
+
+    try:
+        page.goto(TASK_URL, wait_until="domcontentloaded", timeout=45000)
+        time.sleep(6)
+    except Exception as e:
+        print(f"⚠️ 刷新任务页失败：{str(e)}")
+
+    items = get_read_tasks_by_api(page)
+    print_task_list(items)
+
+    if not items:
+        print("❌ 重新获取任务列表失败。")
+        return False
+
+    old_id = None
+    if old_task:
+        old_id = str(old_task.get("id", ""))
+
+    target_task = None
+
+    if old_id:
+        for task in items:
+            if str(task.get("id", "")) == old_id:
+                target_task = task
+                break
+
+    if target_task is None:
+        if len(items) > TARGET_INDEX:
+            target_task = items[TARGET_INDEX]
+
+    if target_task is None:
+        print("❌ 没有找到第二个任务。")
+        return False
+
+    completed = is_task_completed_by_api(target_task)
+
+    print("-" * 40)
+    print("📌 阅读后检测结果：")
+    print(f"标题：{target_task.get('title', '')}")
+    print(f"userStatus：{target_task.get('userStatus')}")
+    print(f"taskDingDang：{target_task.get('taskDingDang')}")
+    print(f"状态：{'已完成' if completed else '未完成'}")
+    print("-" * 40)
+
+    return completed
+
+
+def run_one_account(browser, current_cookie: str, index: int):
+    """
+    执行单个账号
+    """
     print("=" * 40)
-    print(f"🎉 成功解析到 {len(account_cookies)} 个账号配置，准备开始执行...")
+    print(f"🚀 开始执行账号 {index}")
+
+    context = browser.new_context(
+        user_agent=(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/130.0.0.0 Safari/537.36"
+        ),
+        viewport={"width": 1366, "height": 768},
+        locale="zh-CN"
+    )
+
+    context.add_cookies(parse_cookies(current_cookie))
+    page = context.new_page()
+
+    try:
+        print(f"🌐 正在打开任务页面：{TASK_URL}")
+        page.goto(TASK_URL, wait_until="domcontentloaded", timeout=45000)
+
+        print("⏳ 等待页面渲染 6 秒...")
+        time.sleep(6)
+
+        if is_login_invalid(page):
+            print("❌ 当前账号 Cookie 可能已失效，请重新抓取 DXY_COOKIE。")
+            return
+
+        target_task, items = get_target_task_info(page)
+
+        if target_task is None:
+            print("❌ 未找到第二个阅读任务，本账号跳过。")
+            return
+
+        if is_task_completed_by_api(target_task):
+            print("✅ 接口判断：第二个阅读任务已经完成，不需要点击。")
+            return
+
+        click_ok = click_second_read_button(context, page)
+
+        if not click_ok:
+            print("❌ 第二个“去阅读”点击失败。")
+            return
+
+        completed = check_target_task_completed_after_read(page, target_task)
+
+        if completed:
+            print(f"🎉 账号 {index}：第二个阅读任务已完成。")
+        else:
+            print(f"⚠️ 账号 {index}：暂未检测到完成，可能需要延长停留时间或稍后再运行。")
+
+    except Exception as e:
+        print(f"❌ 账号 {index} 执行异常：{str(e)}")
+
+    finally:
+        context.close()
+
+
+def main():
+    cookie_env = os.environ.get("DXY_COOKIE", "")
+
+    if not cookie_env.strip():
+        print("\033[31m[错误] 未找到环境变量 DXY_COOKIE！\033[0m")
+        print("请在环境变量中添加 DXY_COOKIE。")
+        return
+
+    account_cookies = [c.strip() for c in cookie_env.splitlines() if c.strip()]
+
+    print("=" * 40)
+    print(f"🎉 成功解析到 {len(account_cookies)} 个账号配置，准备开始执行。")
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-setuid-sandbox'])
-        
+        browser = p.chromium.launch(
+            headless=True,
+            args=[
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage"
+            ]
+        )
+
         for index, current_cookie in enumerate(account_cookies, start=1):
-            print("-" * 40)
-            print(f"🚀 开始执行 [账号 {index}] ...")
-            
-            context = browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
-            )
-            context.add_cookies(parse_cookies(current_cookie))
-            page = context.new_page()
-            url = "https://hao.dxy.cn/plus/activity?source=livesquare"
-            
-            try:
-                print(f"🌐 正在打开页面: {url}")
-                page.goto(url, wait_until="networkidle", timeout=45000)
-                
-                print("⏳ 等待页面和动态任务列表完全渲染 (6秒)...")
-                time.sleep(6) 
+            run_one_account(browser, current_cookie, index)
 
-                # ==========================================
-                # 全新逻辑：使用 Playwright 原生定位器和物理点击
-                # ==========================================
-                
-                # 1. 精准抓取页面上所有文本就是“去阅读”的元素
-                buttons = page.get_by_text("去阅读", exact=True).all()
-                
-                if not buttons:
-                    print("📋 页面未找到任何“去阅读”按钮。")
-                    continue
-
-                clicked_count = 0
-                skip_count = 0
-                MAX_CLICKS = 5
-
-                for btn in buttons:
-                    if clicked_count >= MAX_CLICKS:
-                        break
-                        
-                    # 确保按钮是实际可见的
-                    if not btn.is_visible():
-                        continue
-
-                    # 2. 判断所属任务卡片是否已完成 (向上查找 8 层父节点提取文本)
-                    is_completed = btn.evaluate("""(node) => {
-                        let parent = node.parentElement;
-                        for(let i=0; i<8; i++) {
-                            if(!parent) break;
-                            const text = parent.innerText || "";
-                            if(text.includes('已完成') || text.includes('finish')) {
-                                return true;
-                            }
-                            parent = parent.parentElement;
-                        }
-                        return false;
-                    }""")
-
-                    # 3. 物理点击
-                    if not is_completed:
-                        try:
-                            print(f"  👉 发现未完成任务，正在执行真实的鼠标点击...")
-                            # force=True 确保无视可能存在的透明遮罩层强行点击
-                            btn.click(force=True)
-                            clicked_count += 1
-                            
-                            # 【关键】真实点击通常会打开新标签页，这里必须停顿等待新页面加载并记录数据
-                            time.sleep(4) 
-                        except Exception as e:
-                            print(f"  ❌ 点击失败: {str(e)}")
-                    else:
-                        skip_count += 1
-
-                print(f"✅ [账号 {index}] 本轮成功物理点击了 {clicked_count} 个任务 (上限5个)。跳过了 {skip_count} 个已完成。")
-                
-                if clicked_count > 0:
-                    print("⏳ 额外保持浏览器存活 10 秒，确保底层阅读接口调用完成...")
-                    time.sleep(10)
-                
-            except Exception as e:
-                print(f"❌ [账号 {index}] 运行发生异常: {str(e)}")
-            finally:
-                context.close()
-                if index < len(account_cookies):
-                    delay = random.randint(3, 8)
-                    print(f"💤 账号切换中，休息 {delay} 秒...")
-                    time.sleep(delay)
+            if index < len(account_cookies):
+                delay = random.randint(5, 10)
+                print(f"💤 切换账号，等待 {delay} 秒...")
+                time.sleep(delay)
 
         browser.close()
-        print("=" * 40)
-        print("🎉 所有账号任务已全部执行完毕！")
+
+    print("=" * 40)
+    print("🎉 所有账号执行完成。")
+
 
 if __name__ == "__main__":
-    time.sleep(random.randint(1, 15))
-    main()
+    time.sleep(random.randint(1, 10))
+
+    try:
+        main()
+    finally:
+        # 本地双击运行时防止窗口闪退；GitHub Actions 不会卡住
+        if os.environ.get("GITHUB_ACTIONS", "").lower() != "true":
+            input("按回车键退出...")
