@@ -7,8 +7,10 @@ import random
 
 try:
     from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
+    from playwright_stealth import stealth_sync
 except ImportError:
-    print("【错误】缺少 playwright 库，请先安装。")
+    print("【错误】缺少依赖库。本地运行请先执行：")
+    print("pip install playwright playwright-stealth")
     exit(1)
 
 # =========================
@@ -16,10 +18,10 @@ except ImportError:
 # =========================
 TASK_URL = "https://hao.dxy.cn/plus/activity?source=livesquare"
 API_URL = "https://hao.dxy.cn/api/client/proxy/api/stats/client/session/task/activity/list?taskType=2&pageNo=1&pageSize=15&reset=true"
+
 MAX_CLICKS = 5
 READ_WAIT_MIN = 45
-READ_WAIT_MAX = 55
-
+READ_WAIT_MAX = 60
 
 def parse_cookies(cookie_str: str, domain: str = ".dxy.cn") -> list:
     cookies = []
@@ -33,8 +35,7 @@ def parse_cookies(cookie_str: str, domain: str = ".dxy.cn") -> list:
         })
     return cookies
 
-
-def fetch_task_list(page):
+def fetch_api_data(page):
     try:
         return page.evaluate(f"""
             async () => {{
@@ -45,27 +46,22 @@ def fetch_task_list(page):
                 return await res.json();
             }}
         """)
-    except Exception:
-        return None
+    except Exception: return None
 
-
-def get_api_task_status(page):
-    data = fetch_task_list(page)
-    if not data or "results" not in data: return 0, 0
+def get_task_status(page):
+    data = fetch_api_data(page)
+    if not data or "results" not in data: return 0, 0, []
     items = data.get("results", {}).get("items", [])
-    if not isinstance(items, list): return 0, 0
     total = len(items)
-    completed = len([item for item in items if item.get("userStatus") == 2])
-    return completed, total
-
+    completed = len([t for t in items if t.get("userStatus") == 2])
+    completed_titles = [t.get("title", "").strip() for t in items if t.get("userStatus") == 2]
+    return completed, total, completed_titles
 
 def simulate_reading(read_page):
     wait_time = random.randint(READ_WAIT_MIN, READ_WAIT_MAX)
     print(f"   📖 正在深度挂机阅读 {wait_time} 秒...")
-    
     try:
         read_page.bring_to_front()
-        # 欺骗浏览器前台状态，防止后台失焦导致计时器暂停
         read_page.evaluate("""
             Object.defineProperty(document, 'visibilityState', {value: 'visible', writable: true});
             Object.defineProperty(document, 'hidden', {value: false, writable: true});
@@ -74,13 +70,12 @@ def simulate_reading(read_page):
 
     start_time = time.time()
     scroll_count = 0
-
     while time.time() - start_time < wait_time:
         try:
             scroll_count += 1
             if scroll_count == 3:
                 read_page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                print("   ⬇️ 已滑动至文章最底部，触发完成判定...")
+                print("   ⬇️ 已滑动至文章最底部...")
             else:
                 read_page.evaluate(f"window.scrollBy(0, {random.randint(400, 800)})")
         except: pass
@@ -91,9 +86,7 @@ def simulate_reading(read_page):
     time.sleep(2)
     print("   ✅ 阅读停留完成。")
 
-
 def click_and_handle_reading(context, page) -> bool:
-    """使用油猴 JS 点击并接管新标签页"""
     old_url = page.url
     try:
         locator = page.locator('[data-dxy-click-target="1"]').first
@@ -112,7 +105,6 @@ def click_and_handle_reading(context, page) -> bool:
                 }""")
             new_page = popup_info.value
             print("   ➡️ 成功捕获弹出的新文章标签页。")
-            
         except PlaywrightTimeoutError:
             print("   ⚠️ 没检测到新标签页，检查是否直接跳转...")
             time.sleep(4)
@@ -124,6 +116,10 @@ def click_and_handle_reading(context, page) -> bool:
         if not new_page:
             print("   ❌ 点击失效，页面无任何响应。")
             return False
+
+        # 注入隐身衣到新页面
+        if not is_same_page:
+            stealth_sync(new_page)
 
         try: new_page.wait_for_load_state("domcontentloaded", timeout=20000)
         except: pass
@@ -137,42 +133,30 @@ def click_and_handle_reading(context, page) -> bool:
             except: pass
             
         return True
-
     except Exception as e:
         print(f"   ❌ 点击处理发生未知异常：{str(e)}")
         return False
-
 
 def run_one_account(browser, cookie_str: str, account_index: int):
     print("=" * 50)
     print(f"🚀 开始执行账号 [{account_index}]")
     
-    # ==========================================
-    # 【核心反侦察配置】完美复刻你截图里的指纹！
-    # ==========================================
     context = browser.new_context(
         user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
-        viewport={"width": 1536, "height": 960}, # 匹配你之前 DA 事件里暴露的屏幕分辨率
+        viewport={"width": 1536, "height": 960}, 
         locale="zh-CN", timezone_id="Asia/Shanghai",
         extra_http_headers={
             "Sec-Ch-Ua": '"Chromium";v="148", "Google Chrome";v="148", "Not/A)Brand";v="99"',
             "Sec-Ch-Ua-Mobile": "?0",
             "Sec-Ch-Ua-Platform": '"Windows"',
             "Accept-Language": "zh-CN,zh;q=0.9",
-            "DNT": "1"
         }
     )
-    
-    # 注入“隐身衣”：强行抹除无头浏览器的机器人特征
-    context.add_init_script("""
-        Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-        window.navigator.chrome = { runtime: {} };
-        Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
-        Object.defineProperty(navigator, 'languages', {get: () => ['zh-CN', 'zh', 'en']});
-    """)
-    
     context.add_cookies(parse_cookies(cookie_str))
+    
     page = context.new_page()
+    # 【核心反侦察】：启动隐身模式，对抗极验指纹检测
+    stealth_sync(page)
 
     clicked_count = 0
     skip_titles = set()
@@ -182,7 +166,7 @@ def run_one_account(browser, cookie_str: str, account_index: int):
         page.goto(TASK_URL, wait_until="domcontentloaded", timeout=60000)
         time.sleep(6)
 
-        initial_completed, total = get_api_task_status(page)
+        initial_completed, total, api_completed_titles = get_task_status(page)
         print(f"📊 接口摸底：今日总任务 {total} 个 | 已完成 {initial_completed} 个")
 
         if total > 0 and initial_completed >= total:
@@ -207,10 +191,12 @@ def run_one_account(browser, cookie_str: str, account_index: int):
                 time.sleep(2)
             except: pass
 
-            # 标记下一个未读按钮
             result = page.evaluate("""
-                (skipTitles) => {
+                (payload) => {
                     const TARGET_ATTR = "data-dxy-click-target";
+                    const skipTitles = payload.skipTitles || [];
+                    const apiCompleted = payload.apiCompleted || [];
+                    
                     document.querySelectorAll("[" + TARGET_ATTR + "]").forEach(el => el.removeAttribute(TARGET_ATTR));
                     
                     let btns = Array.from(document.querySelectorAll("div.operate-btn"))
@@ -220,14 +206,26 @@ def run_one_account(browser, cookie_str: str, account_index: int):
                         let card = btn.closest('.task_item');
                         if (!card) continue;
                         
-                        // 过滤已完成水印
+                        // 1. 检查 UI 水印
                         if (card.querySelector("img[alt='已完成水印'], img.watermark, .watermark")) continue;
                         
-                        // 提取标题并去重过滤
+                        // 2. 检查标题 (结合 API 绝对真理与本地黑名单)
                         let title = (card.innerText || "").split('\\n').filter(x=>x.trim().length>0)[0] || "";
+                        let cleanTitle = title.replace(/\\s+/g, "").trim();
+                        
                         let shouldSkip = false;
+                        
                         for (let st of skipTitles) {
-                            if (st && title && title.includes(st)) { shouldSkip = true; break; }
+                            if (st && cleanTitle && cleanTitle.includes(st.replace(/\\s+/g, "").trim())) { shouldSkip = true; break; }
+                        }
+                        
+                        if (!shouldSkip) {
+                            for(let apiTitle of apiCompleted) {
+                                let cleanApi = apiTitle.replace(/\\s+/g, "").trim();
+                                if (cleanApi && cleanTitle && (cleanApi.includes(cleanTitle) || cleanTitle.includes(cleanApi))) { 
+                                    shouldSkip = true; break; 
+                                }
+                            }
                         }
                         
                         if (!shouldSkip) {
@@ -237,10 +235,13 @@ def run_one_account(browser, cookie_str: str, account_index: int):
                     }
                     return { ok: false };
                 }
-            """, list(skip_titles))
+            """, {
+                "skipTitles": list(skip_titles),
+                "apiCompleted": api_completed_titles
+            })
 
             if not result or not result.get("ok"):
-                print("✅ 页面上没有发现新的待阅读任务。")
+                print("✅ 页面上所有可见的任务均已在后台完成。")
                 break
 
             title = str(result.get("title", "")).strip()
@@ -256,7 +257,7 @@ def run_one_account(browser, cookie_str: str, account_index: int):
                 time.sleep(6)
             except: pass
 
-            after_completed, _ = get_api_task_status(page)
+            after_completed, _, api_completed_titles = get_task_status(page)
             if after_completed >= total:
                 break
 
@@ -264,7 +265,7 @@ def run_one_account(browser, cookie_str: str, account_index: int):
         print("🔎 正在等待数据入库并复查入账情况...")
         time.sleep(6)
         
-        final_completed, final_total = get_api_task_status(page)
+        final_completed, final_total, _ = get_task_status(page)
         newly_completed = final_completed - initial_completed
         print(f"💰 成果核对：本轮新增完成 {newly_completed} 个任务，今日累计完成 {final_completed}/{final_total} 个。")
 
@@ -273,11 +274,10 @@ def run_one_account(browser, cookie_str: str, account_index: int):
     finally:
         context.close()
 
-
 def main():
     cookie_env = os.environ.get("DXY_COOKIE", "")
     if not cookie_env.strip():
-        print("\033[31m[错误] 未找到环境变量 DXY_COOKIE！\033[0m")
+        print("\033[31m[错误] 未找到环境变量 DXY_COOKIE，请在 GitHub Secrets 中配置！\033[0m")
         return
     
     account_cookies = [c.strip() for c in cookie_env.splitlines() if c.strip()]
@@ -285,6 +285,7 @@ def main():
     print(f"🎉 成功识别到 {len(account_cookies)} 个账号配置。")
 
     with sync_playwright() as p:
+        # Actions 环境：headless=True，隐身参数拉满
         browser = p.chromium.launch(
             headless=True, 
             args=[
@@ -305,5 +306,5 @@ def main():
     print("🎉 所有账号打卡流程全部执行完毕。")
 
 if __name__ == "__main__":
-    time.sleep(random.randint(1, 10))
+    time.sleep(random.randint(1, 15))
     main()
