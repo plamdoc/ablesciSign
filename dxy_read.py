@@ -15,9 +15,7 @@ except ImportError:
 
 
 def parse_cookies(cookie_str: str, domain: str = ".dxy.cn") -> list:
-    """
-    将原生字符串形式的 Cookie 转换为 Playwright 需要的字典列表格式
-    """
+    """将原生字符串形式的 Cookie 转换为 Playwright 需要的字典列表格式"""
     cookies = []
     for item in cookie_str.split(';'):
         if '=' in item:
@@ -32,7 +30,6 @@ def parse_cookies(cookie_str: str, domain: str = ".dxy.cn") -> list:
 
 
 def main():
-    # 从 GitHub Secrets 中读取环境变量
     cookie_env = os.environ.get('DXY_COOKIE', '')
     if not cookie_env:
         print("\033[31m[错误] 未找到环境变量 DXY_COOKIE，请检查 GitHub Secrets 配置！\033[0m")
@@ -44,7 +41,6 @@ def main():
     print(f"🎉 成功解析到 {len(account_cookies)} 个账号配置，准备开始执行...")
 
     with sync_playwright() as p:
-        # headless=True 表示云端后台静默运行
         browser = p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-setuid-sandbox'])
         
         # 循环执行每个账号
@@ -52,12 +48,10 @@ def main():
             print("-" * 40)
             print(f"🚀 开始执行 [账号 {index}] ...")
             
-            # 独立上下文，防止多个账号之间的数据串线
             context = browser.new_context(
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
             )
             
-            # 注入当前账号的 Cookie
             context.add_cookies(parse_cookies(current_cookie))
             page = context.new_page()
             url = "https://hao.dxy.cn/plus/activity?source=livesquare"
@@ -69,7 +63,7 @@ def main():
                 print(f"⏳ [账号 {index}] 等待动态任务列表渲染 (5秒)...")
                 time.sleep(5) 
 
-                # 核心 JS 扫描和点击逻辑
+                # 核心 JS 扫描和点击逻辑 (已添加最多点击 5 次的限制)
                 js_logic = """
                 () => {
                     const allBtnNodes = [];
@@ -85,12 +79,13 @@ def main():
 
                     let clickedCount = 0;
                     let skipCount = 0;
+                    const MAX_CLICKS = 5; // 【新增】设置单次最大点击数量
 
-                    allBtnNodes.forEach(btnEl => {
+                    // 使用 for...of 循环代替 forEach，以便可以使用 break 中断循环
+                    for (let btnEl of allBtnNodes) {
                         let taskCard = btnEl;
                         let parent = btnEl.parentElement;
 
-                        // 锁定独立任务卡片
                         while(parent) {
                             let containsCount = 0;
                             for(let b of allBtnNodes) {
@@ -104,17 +99,19 @@ def main():
 
                         const htmlStr = taskCard.innerHTML.toLowerCase();
                         const textStr = taskCard.textContent || '';
-                        
-                        // 智能识别“已完成”状态
                         const isCompleted = textStr.includes('已完成') || htmlStr.includes('已完成') || htmlStr.includes('finish');
 
                         if (!isCompleted) {
+                            // 【新增】如果已经点击了 5 个，直接跳出循环，不再点剩下的
+                            if (clickedCount >= MAX_CLICKS) {
+                                break; 
+                            }
                             btnEl.click();
                             clickedCount++;
                         } else {
                             skipCount++;
                         }
-                    });
+                    }
 
                     return { clicked: clickedCount, skipped: skipCount, msg: "扫描完成" };
                 }
@@ -122,7 +119,7 @@ def main():
                 
                 result = page.evaluate(js_logic)
                 print(f"📋 [账号 {index}] 扫描结果: {result['msg']}")
-                print(f"✅ [账号 {index}] 成功点击了 {result['clicked']} 个未完成任务，智能跳过了 {result['skipped']} 个已完成任务。")
+                print(f"✅ [账号 {index}] 成功点击了 {result['clicked']} 个未完成任务 (单次上限5个)，智能跳过了 {result['skipped']} 个已完成任务。")
                 
                 if result['clicked'] > 0:
                     print(f"⏳ [账号 {index}] 正在保持浏览器存活 15 秒，确保阅读数据正常上报...")
@@ -132,7 +129,6 @@ def main():
                 print(f"❌ [账号 {index}] 运行中发生异常错误: {str(e)}")
             finally:
                 context.close()
-                # 如果还有下一个账号，随机休息几秒，避免并发特征太明显
                 if index < len(account_cookies):
                     delay = random.randint(3, 8)
                     print(f"💤 账号切换中，防风控休息 {delay} 秒...")
@@ -143,6 +139,5 @@ def main():
         print("🎉 所有账号任务已全部执行完毕！")
 
 if __name__ == "__main__":
-    # 整个脚本启动前随机延迟 1-15 秒，防止准点被查水表
     time.sleep(random.randint(1, 15))
     main()
