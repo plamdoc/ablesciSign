@@ -5,12 +5,13 @@ import os
 import time
 import random
 
+# 修改了这里的异常捕获，确保如果缺少库会打印真实的详细原因
 try:
     from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
     from playwright_stealth import stealth_sync
-except ImportError:
-    print("【错误】缺少依赖库。本地运行请先执行：")
-    print("pip install playwright playwright-stealth")
+except ImportError as e:
+    print(f"【致命错误】依赖库导入失败，真实原因是：{e}")
+    print("本地运行请先执行：pip install playwright playwright-stealth")
     exit(1)
 
 # =========================
@@ -168,7 +169,6 @@ def run_one_account(browser, cookie_str: str, account_index: int):
         context.close()
 
 def main():
-    # 这里已经严格匹配你 YAML 里的 DXY_COOKIE
     cookie_env = os.environ.get("DXY_COOKIE", "")
     if not cookie_env.strip():
         print("\033[31m[错误] 未找到环境变量 DXY_COOKIE，请在 GitHub Secrets 中配置！\033[0m")
