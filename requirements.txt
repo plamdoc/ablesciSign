@@ -1,3 +1,5 @@
 requests>=2.28.0,<3.0.0
 urllib3>=1.26.0,<2.0.0
 cachetools>=4.0.0,<5.0.0
+requests
+playwright
