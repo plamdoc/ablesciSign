@@ -1,43 +1,31 @@
-name: 丁香园全自动阅读挂机
+name: 丁香园每小时自动阅读
 
 on:
-  workflow_dispatch: # 保留手动执行按钮，方便随时测试
   schedule:
-    # 每天北京时间上午 09:00 到晚上 23:00，每间隔 2 小时运行一次。
-    # (拉长间隔，进一步降低风控概率)
-    - cron: '0 1-15/2 * * *'
+    # 国际标准时间每小时的 0 分执行（即北京时间每小时的 0 分，例如 10:00, 11:00...）
+    # 注：GitHub Actions 的定时任务可能会有几分钟到十几分钟的排队延迟，属于正常现象
+    - cron: '0 * * * *'
+  workflow_dispatch: # 允许在 Actions 页面手动点击运行，方便测试
 
 jobs:
-  run-task:
+  run-dxy-task:
     runs-on: ubuntu-latest
-    
-    # 【新增补丁】强制使用 Node.js 24 消除官方过时警告
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     steps:
-      - name: 1. 检出仓库代码
-        uses: actions/checkout@v4
+    - name: 检出代码仓库 (Checkout)
+      uses: actions/checkout@v3
 
-      - name: 2. 安装并配置 Python 运行环境
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
+    - name: 配置 Python 环境
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
 
-      - name: 3. 安装 Python 核心依赖 (包含隐身防封控插件)
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install playwright playwright-stealth
+    - name: 安装依赖 (Install dependencies)
+      run: |
+        python -m pip install --upgrade pip
+        if [ -f requirements.txt ]; then pip install -r requirements.txt; else pip install requests; fi
 
-      - name: 4. 安装 Playwright 浏览器内核及系统依赖
-        run: |
-          playwright install --with-deps chromium
-
-      - name: 5. 启动自动阅读脚本
-        env:
-          # 从 GitHub Secrets 中读取 Cookie
-          DXY_COOKIE: ${{ secrets.DXY_COOKIE }}
-          # 强制实时输出日志，拒绝卡顿假死
-          PYTHONUNBUFFERED: 1  
-        run: |
-          python dxy_read.py
+    - name: 运行阅读脚本 (Run DXY Script)
+      env:
+        DXY_COOKIE: ${{ secrets.DXY_COOKIE }} 
+      run: python dxy_read.py
