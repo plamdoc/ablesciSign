@@ -4,12 +4,18 @@ import time
 
 def run_account_tasks(cookie, account_index):
     """处理单个账号的阅读任务"""
+    
+    # 💡 核心修改区：加入了 Referer 和 Origin，伪装成从任务中心页面点进去的真实人类浏览器
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Cookie': cookie,
-        'Accept': 'application/json, text/plain, */*'
+        'Accept': 'application/json, text/plain, */*',
+        'Referer': 'https://hao.dxy.cn/plus/activity?source=livesquare', 
+        'Origin': 'https://hao.dxy.cn',
+        'Connection': 'keep-alive'
     }
 
+    # 获取任务列表的接口
     list_url = "https://hao.dxy.cn/api/client/proxy/api/stats/client/session/task/activity/list?taskType=2&pageNo=1&pageSize=15&reset=true"
     
     print(f"\n================ 开始执行 [账号 {account_index}] ================")
@@ -46,16 +52,17 @@ def run_account_tasks(cookie, account_index):
 
             print(f"[{index + 1}/{len(items)}] 📖 正在阅读: {title} (ID: {task_id})")
             
+            # 拼接阅读跳转链接
             task_url = f"https://hao.dxy.cn/plus/activity/linkTask/{task_id}"
             task_res = requests.get(task_url, headers=headers)
             
             if task_res.status_code == 200:
-                print(f"   -> 🎉 点击成功！")
+                print(f"   -> 🎉 点击请求发送成功！")
                 success_count += 1
             else:
                 print(f"   -> ❌ 请求失败，状态码: {task_res.status_code}")
             
-            # 账号内的任务延时
+            # 账号内的任务延时 (3秒)
             time.sleep(3)
                 
         print(f"🎉 [账号 {account_index}] 本轮执行完毕！共成功点击 {success_count} 个新任务。")
@@ -84,7 +91,7 @@ def main():
     for idx, cookie in enumerate(cookies, start=1):
         run_account_tasks(cookie, idx)
         
-        # 多个账号之间增加一点缓冲时间，防止被平台风控关联
+        # 多个账号之间增加缓冲时间 (5秒)，防止被平台风控关联
         if idx < len(cookies):
             print(f"\n⏳ 等待 5 秒后切换至下一个账号...")
             time.sleep(5)
