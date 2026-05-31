@@ -2,10 +2,24 @@ import requests
 import os
 import time
 
+# 列表接口 URL
+LIST_URL = "https://hao.dxy.cn/api/client/proxy/api/stats/client/session/task/activity/list?taskType=2&pageNo=1&pageSize=15&reset=true"
+
+def get_task_list(headers):
+    """获取任务列表并返回 items"""
+    response = requests.get(LIST_URL, headers=headers)
+    response.raise_for_status()
+    return response.json().get('results', {}).get('items', [])
+
+def check_task_success(headers, target_task_id):
+    """重新获取列表，检查指定 task_id 的状态是否变为已完成 (userStatus == 2)"""
+    items = get_task_list(headers)
+    for item in items:
+        if item.get('id') == target_task_id:
+            return item.get('userStatus') == 2
+    return False
+
 def run_account_tasks(cookie, account_index):
-    """处理单个账号的阅读任务"""
-    
-    # 💡 核心修改区：加入了 Referer 和 Origin，伪装成从任务中心页面点进去的真实人类浏览器
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Cookie': cookie,
@@ -14,34 +28,29 @@ def run_account_tasks(cookie, account_index):
         'Origin': 'https://hao.dxy.cn',
         'Connection': 'keep-alive'
     }
-
-    # 获取任务列表的接口
-    list_url = "https://hao.dxy.cn/api/client/proxy/api/stats/client/session/task/activity/list?taskType=2&pageNo=1&pageSize=15&reset=true"
     
     print(f"\n================ 开始执行 [账号 {account_index}] ================")
     try:
-        response = requests.get(list_url, headers=headers)
-        response.raise_for_status()
-        data = response.json()
-        
-        items = data.get('results', {}).get('items', [])
+        items = get_task_list(headers)
         if not items:
-            print("⚠️ 未找到任务列表，可能是 Cookie 已过期或今日无任务。")
+            print("⚠️ 未找到任务列表，可能是 Cookie 已过期。")
             return
         
         print(f"✅ 成功获取列表，共发现 {len(items)} 个阅读任务。")
         
-        MAX_CLICKS = 5  # 限制每次运行最多只点击 5 个任务
+        MAX_CLICKS = 5
         success_count = 0
         
         for index, item in enumerate(items):
             if success_count >= MAX_CLICKS:
-                print(f"🛑 [账号 {account_index}] 已达到本次最大点击限制（{MAX_CLICKS}个），剩下的留到下小时。")
+                print(f"🛑 [账号 {account_index}] 已达到本次最大尝试限制（{MAX_CLICKS}个）。")
                 break
 
             task_id = item.get('id')
             title = item.get('title', '未知标题')
             user_status = item.get('userStatus')
+            # 提取真实文章的 URL
+            content_url = item.get('contentUrl') 
             
             if not task_id:
                 continue
@@ -50,53 +59,48 @@ def run_account_tasks(cookie, account_index):
                 print(f"[{index + 1}/{len(items)}] ⏭️ 跳过已完成: {title}")
                 continue
 
-            print(f"[{index + 1}/{len(items)}] 📖 正在阅读: {title} (ID: {task_id})")
+            print(f"[{index + 1}/{len(items)}] 📖 尝试阅读: {title}")
             
-            # 拼接阅读跳转链接
+            # 步骤 1：请求点击追踪链接
             task_url = f"https://hao.dxy.cn/plus/activity/linkTask/{task_id}"
-            task_res = requests.get(task_url, headers=headers)
+            requests.get(task_url, headers=headers)
             
-            if task_res.status_code == 200:
-                print(f"   -> 🎉 点击请求发送成功！")
+            # 步骤 2：追加请求真实的 contentUrl (模拟浏览器跳转)
+            if content_url:
+                # 伪装是从 linkTask 跳转过来的
+                article_headers = headers.copy()
+                article_headers['Referer'] = task_url 
+                requests.get(content_url, headers=article_headers)
+            
+            # 步骤 3：模拟停留阅读 4 秒钟，等待服务器结算
+            time.sleep(4)
+            
+            # 步骤 4：严格校验！重新拉取列表判断是否真的成功了
+            is_really_success = check_task_success(headers, task_id)
+            
+            if is_really_success:
+                print(f"   -> 🎉 校验成功！积分已到账。")
                 success_count += 1
             else:
-                print(f"   -> ❌ 请求失败，状态码: {task_res.status_code}")
-            
-            # 账号内的任务延时 (3秒)
-            time.sleep(3)
+                print(f"   -> ❌ 校验失败：请求已发送，但服务器未判定完成。可能存在隐藏的 POST 打卡接口。")
                 
-        print(f"🎉 [账号 {account_index}] 本轮执行完毕！共成功点击 {success_count} 个新任务。")
+        print(f"🎉 [账号 {account_index}] 运行完毕！共真实完成 {success_count} 个任务。")
 
     except Exception as e:
         print(f"❌ [账号 {account_index}] 运行发生错误: {e}")
 
-
 def main():
-    # 1. 获取包含多个 Cookie 的环境变量
     cookie_env = os.environ.get('DXY_COOKIE')
     if not cookie_env:
-        print("❌ 未找到 DXY_COOKIE 环境变量，请检查 GitHub Secrets 配置。")
+        print("❌ 未找到 DXY_COOKIE 环境变量。")
         return
     
-    # 2. 按换行符分割出多个账号的 Cookie，并去除空行
     cookies = [c.strip() for c in cookie_env.split('\n') if c.strip()]
     
-    if not cookies:
-        print("❌ 环境变量中没有提取到有效的 Cookie。")
-        return
-        
-    print(f"🚀 检测到 {len(cookies)} 个账号配置，准备开始批量执行...")
-    
-    # 3. 遍历每个 Cookie 执行任务
     for idx, cookie in enumerate(cookies, start=1):
         run_account_tasks(cookie, idx)
-        
-        # 多个账号之间增加缓冲时间 (5秒)，防止被平台风控关联
         if idx < len(cookies):
-            print(f"\n⏳ 等待 5 秒后切换至下一个账号...")
             time.sleep(5)
-            
-    print("\n✅ 所有账号的任务均已处理完毕！")
 
 if __name__ == "__main__":
     main()
