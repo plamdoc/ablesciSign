@@ -33,7 +33,6 @@ def run_account(cookie_str, account_idx):
         
         # 2. 启动真实无头浏览器
         with sync_playwright() as p:
-            # 增加参数，试图绕过基础的反爬检测
             browser = p.chromium.launch(
                 headless=True,
                 args=['--disable-blink-features=AutomationControlled'] 
@@ -42,11 +41,8 @@ def run_account(cookie_str, account_idx):
                 user_agent=req_headers['User-Agent'],
                 viewport={'width': 1280, 'height': 800}
             )
-            
-            # 注入 Cookie
             context.add_cookies(parse_cookie_string(cookie_str))
             
-            # 创建新页面并注入反检测 JS 脚本 (关键：抹除 webdriver 特征)
             page = context.new_page()
             page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
 
@@ -56,27 +52,34 @@ def run_account(cookie_str, account_idx):
                     break
                     
                 task_id = task.get('id')
-                content_url = task.get('contentUrl', '')
-                print(f"[{i+1}/{len(todo_tasks)}] 📖 浏览器正在阅读: {task.get('title')}")
+                print(f"[{i+1}/{len(todo_tasks)}] 📖 正在模拟阅读: {task.get('title')}")
+                
+                # ---------------- 核心防弹区域 ----------------
+                try:
+                    # 告诉浏览器去访问，如果发生 302 重定向报错，直接忽略
+                    page.goto(f"https://hao.dxy.cn/plus/activity/linkTask/{task_id}", timeout=15000)
+                except Exception:
+                    pass # 忽略 Playwright 的跳转打断错误
+                
+                # 给网页飞一会儿的时间（等待重定向彻底落地）
+                page.wait_for_timeout(4000)
                 
                 try:
-                    # 先访问中转链接打卡
-                    page.goto(f"https://hao.dxy.cn/plus/activity/linkTask/{task_id}", timeout=20000, wait_until="commit")
-                    page.wait_for_timeout(2000)
-                    
-                    # 如果有真实文章内容地址，主动跳转过去，确保触发打卡 JS
-                    if content_url and "hao.dxy.cn" in content_url:
-                        page.goto(content_url, timeout=20000, wait_until="domcontentloaded")
-                    
-                    # 打印当前页面标题，用于排查是否被拦截在登录页或验证码页
-                    print(f"   -> 当前页面定位: {page.title()}")
-                    
-                    # 深度阅读模拟：分 4 次滑动，每次间隔 3 秒，总共停留 12 秒
-                    for _ in range(4):
-                        page.evaluate("window.scrollBy(0, 400)")
-                        page.wait_for_timeout(3000) 
-                    
-                    # 重新拉取接口核对
+                    print(f"   -> 落地页面: {page.title()}")
+                except Exception:
+                    pass
+                
+                # 分段滑动，强行续命 12 秒。遇到上下文销毁直接无视。
+                for _ in range(4):
+                    try:
+                        page.evaluate("window.scrollBy(0, 500)")
+                    except Exception:
+                        pass # 忽略所有执行环境被销毁的报错
+                    page.wait_for_timeout(3000)
+                # ----------------------------------------------
+                
+                # 重新拉取接口核对
+                try:
                     verify_res = requests.get(LIST_URL, headers=req_headers).json()
                     new_status = next((t.get('userStatus') for t in verify_res.get('results', {}).get('items', []) if t.get('id') == task_id), 0)
                     
@@ -84,11 +87,10 @@ def run_account(cookie_str, account_idx):
                         print("   -> 🎉 校验成功！积分已到账。")
                         success_count += 1
                     else:
-                        print("   -> ❌ 校验失败：请结合上面的'当前页面定位'排查原因。")
-                        
+                        print("   -> ❌ 校验失败：可能阅读时长不够或平台风控。")
                 except Exception as e:
-                    print(f"   -> ⚠️ 浏览器访问超时或报错，继续下一个: {e}")
-                    
+                    print(f"   -> ⚠️ 校验状态异常: {e}")
+                        
             browser.close()
             
     except Exception as e:
@@ -103,4 +105,4 @@ if __name__ == "__main__":
     else:
         for idx, c in enumerate(cookies, 1):
             run_account(c, idx)
-            time.sleep(3) # 账号间缓冲
+            time.sleep(3)
