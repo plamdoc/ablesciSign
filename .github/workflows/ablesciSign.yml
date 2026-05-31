@@ -1,31 +1,23 @@
-
-name: ablesci-checkin
+name: 丁香园自动阅读
 
 on:
-  workflow_dispatch: #手动执行
-  schedule:          # 定时任务
-     - cron: '30 22 * * *' # 每天北京时间/新加坡时间早上7点30执行
-jobs:
-  checkin:
-    runs-on: ubuntu-22.04
-    steps:
-    - name: Checkout
-      uses: actions/checkout@main
+  schedule:
+    - cron: '0 * * * *'
+  workflow_dispatch: 
 
-    - name: Initialize Python environment
-      uses: actions/setup-python@v5
+jobs:
+  run-task:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    - uses: actions/setup-python@v4
       with:
         python-version: '3.10'
-        cache: 'pip' # caching pip dependencies
-
-    - name: Install requirements
+    - name: 安装依赖
       run: |
-        python -m pip install --upgrade pip
-        pip install -r ./requirements.txt
-
-    - name: Checkin
-      run: |
-        python3 ./ablesci.py    #要执行的py代码
-      env: #设置secrets的环境变量
-        ABLESCICOOKIE: ${{ secrets.ABLESCICOOKIE }}
-        SCKEY: ${{ secrets.SCKEY }}  # 息知的XZKEY; secrets可填
+        pip install requests playwright
+        playwright install chromium
+    - name: 运行脚本
+      env:
+        DXY_COOKIE: ${{ secrets.DXY_COOKIE }} 
+      run: python dxy_read.py
