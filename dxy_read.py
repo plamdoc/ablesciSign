@@ -14,7 +14,7 @@ def parse_cookie_string(cookie_str):
 def run_account(cookie_str, account_idx):
     print(f"\n========== 开始执行 [账号 {account_idx}] ==========")
     req_headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Cookie': cookie_str,
         'Accept': 'application/json'
     }
@@ -31,12 +31,24 @@ def run_account(cookie_str, account_idx):
 
         success_count = 0
         
-        # 2. 启动真实无头浏览器去阅读
+        # 2. 启动真实无头浏览器
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            context = browser.new_context(user_agent=req_headers['User-Agent'])
+            # 增加参数，试图绕过基础的反爬检测
+            browser = p.chromium.launch(
+                headless=True,
+                args=['--disable-blink-features=AutomationControlled'] 
+            )
+            context = browser.new_context(
+                user_agent=req_headers['User-Agent'],
+                viewport={'width': 1280, 'height': 800}
+            )
+            
+            # 注入 Cookie
             context.add_cookies(parse_cookie_string(cookie_str))
+            
+            # 创建新页面并注入反检测 JS 脚本 (关键：抹除 webdriver 特征)
             page = context.new_page()
+            page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
 
             for i, task in enumerate(todo_tasks):
                 if success_count >= MAX_CLICKS:
@@ -44,15 +56,25 @@ def run_account(cookie_str, account_idx):
                     break
                     
                 task_id = task.get('id')
+                content_url = task.get('contentUrl', '')
                 print(f"[{i+1}/{len(todo_tasks)}] 📖 浏览器正在阅读: {task.get('title')}")
                 
                 try:
-                    # 让真实浏览器去访问跳转链接
-                    page.goto(f"https://hao.dxy.cn/plus/activity/linkTask/{task_id}", timeout=20000)
+                    # 先访问中转链接打卡
+                    page.goto(f"https://hao.dxy.cn/plus/activity/linkTask/{task_id}", timeout=20000, wait_until="commit")
+                    page.wait_for_timeout(2000)
                     
-                    # 模拟真人滚动并等待 6 秒，确保网页里的 JS 埋点发送成功！
-                    page.evaluate("window.scrollBy(0, 800)")
-                    page.wait_for_timeout(6000) 
+                    # 如果有真实文章内容地址，主动跳转过去，确保触发打卡 JS
+                    if content_url and "hao.dxy.cn" in content_url:
+                        page.goto(content_url, timeout=20000, wait_until="domcontentloaded")
+                    
+                    # 打印当前页面标题，用于排查是否被拦截在登录页或验证码页
+                    print(f"   -> 当前页面定位: {page.title()}")
+                    
+                    # 深度阅读模拟：分 4 次滑动，每次间隔 3 秒，总共停留 12 秒
+                    for _ in range(4):
+                        page.evaluate("window.scrollBy(0, 400)")
+                        page.wait_for_timeout(3000) 
                     
                     # 重新拉取接口核对
                     verify_res = requests.get(LIST_URL, headers=req_headers).json()
@@ -62,7 +84,7 @@ def run_account(cookie_str, account_idx):
                         print("   -> 🎉 校验成功！积分已到账。")
                         success_count += 1
                     else:
-                        print("   -> ❌ 校验失败：服务器未确认。")
+                        print("   -> ❌ 校验失败：请结合上面的'当前页面定位'排查原因。")
                         
                 except Exception as e:
                     print(f"   -> ⚠️ 浏览器访问超时或报错，继续下一个: {e}")
@@ -81,3 +103,4 @@ if __name__ == "__main__":
     else:
         for idx, c in enumerate(cookies, 1):
             run_account(c, idx)
+            time.sleep(3) # 账号间缓冲
