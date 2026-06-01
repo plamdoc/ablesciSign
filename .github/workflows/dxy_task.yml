@@ -2,7 +2,7 @@ name: 丁香园每小时自动阅读 (Playwright版)
 
 on:
   schedule:
-    - cron: '0 * * * *'
+       - cron: '*/30 * * * *'  
   workflow_dispatch: 
 
 jobs:
