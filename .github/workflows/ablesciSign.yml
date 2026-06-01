@@ -1,23 +1,44 @@
-name: abs自动阅读
+name: AbleSci Auto Sign
 
 on:
+  workflow_dispatch:
   schedule:
-    - cron: '0 * * * *'
-  workflow_dispatch: 
+    - cron: '40 13,23 * * *'  # UTC时间(北京时间为21:40和次日7:40)
 
 jobs:
-  run-task:
+  sign:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v3
-    - uses: actions/setup-python@v4
-      with:
-        python-version: '3.10'
-    - name: 安装依赖
-      run: |
-        pip install requests playwright
-        playwright install chromium
-    - name: 运行脚本
-      env:
-        DXY_COOKIE: ${{ secrets.DXY_COOKIE }} 
-      run: python dxy_read.py
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run AbleSci Sign
+        id: sign
+        run: |
+          python ablesci.py > output.log
+          LOG_CONTENT=$(cat output.log)
+          echo "LOG_CONTENT<<EOF" >> $GITHUB_ENV
+          echo "$LOG_CONTENT" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+        env:
+          GITHUB_ACTIONS: true
+          ABLESCI_ACCOUNTS: ${{ secrets.ABLESCI_ACCOUNTS }}
+          # 选择一种通知服务
+          # SCKEY: ${{ secrets.SCKEY }}          # Server酱
+          # XZKEY: ${{ secrets.XZKEY }}        # 息知 (按需启用)
+          PUSH_PLUS_TOKEN: ${{ secrets.PUSH_PLUS_TOKEN }} # PushPlus (按需启用)
+
+      - name: Display Log
+        run: |
+          echo "$LOG_CONTENT"
