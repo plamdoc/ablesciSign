@@ -1,23 +1,47 @@
-name: 丁香园自动阅读
+name: 丁香园自动阅读 (Server酱推送版)
 
 on:
   schedule:
+    # 北京时间每小时的 0 分触发
     - cron: '0 * * * *'
-  workflow_dispatch: 
+  workflow_dispatch: # 允许手动点击运行
 
 jobs:
-  run-task:
+  run-dxy-task:
     runs-on: ubuntu-latest
+
     steps:
-    - uses: actions/checkout@v3
-    - uses: actions/setup-python@v4
+    - name: 检出代码仓库 (Checkout)
+      uses: actions/checkout@v4
+
+    - name: 配置 Python 环境
+      uses: actions/setup-python@v5
       with:
         python-version: '3.10'
+        cache: 'pip' 
+
     - name: 安装依赖
       run: |
-        pip install requests playwright
-        playwright install chromium
-    - name: 运行脚本
+        python -m pip install --upgrade pip
+        if [ -f requirements.txt ]; then pip install -r requirements.txt; else pip install requests playwright; fi
+
+    - name: 安装 Playwright 浏览器内核
+      run: playwright install chromium
+
+    - name: 运行阅读脚本
+      id: read_task
+      run: |
+        python dxy_read.py | tee output.log
+        
+        echo "LOG_CONTENT<<EOF" >> $GITHUB_ENV
+        cat output.log >> $GITHUB_ENV
+        echo "EOF" >> $GITHUB_ENV
       env:
+        GITHUB_ACTIONS: true
         DXY_COOKIE: ${{ secrets.DXY_COOKIE }} 
-      run: python dxy_read.py
+        # 🔑 启用 Server酱推送密钥
+        SCKEY: ${{ secrets.SCKEY }} 
+
+    - name: 显示最终运行日志
+      run: |
+        echo "$LOG_CONTENT"
