@@ -35,9 +35,9 @@ jobs:
           GITHUB_ACTIONS: true
           ABLESCI_ACCOUNTS: ${{ secrets.ABLESCI_ACCOUNTS }}
           # 选择一种通知服务
-          # SCKEY: ${{ secrets.SCKEY }}          # Server酱
+           SCKEY: ${{ secrets.SCKEY }}          # Server酱
           # XZKEY: ${{ secrets.XZKEY }}        # 息知 (按需启用)
-          PUSH_PLUS_TOKEN: ${{ secrets.PUSH_PLUS_TOKEN }} # PushPlus (按需启用)
+          #PUSH_PLUS_TOKEN: ${{ secrets.PUSH_PLUS_TOKEN }} # PushPlus (按需启用)
 
       - name: Display Log
         run: |
