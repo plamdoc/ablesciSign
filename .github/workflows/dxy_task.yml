@@ -1,32 +1,23 @@
-name: 丁香园每小时自动阅读 (Playwright版)
+name: 丁香园自动阅读
 
 on:
   schedule:
-       - cron: '*/30 * * * *'  
+    - cron: '0 * * * *'
   workflow_dispatch: 
 
 jobs:
-  run-dxy-task:
+  run-task:
     runs-on: ubuntu-latest
-
     steps:
-    - name: 检出代码仓库
-      uses: actions/checkout@v3
-
-    - name: 配置 Python 环境
-      uses: actions/setup-python@v4
+    - uses: actions/checkout@v3
+    - uses: actions/setup-python@v4
       with:
         python-version: '3.10'
-
     - name: 安装依赖
       run: |
-        python -m pip install --upgrade pip
-        if [ -f requirements.txt ]; then pip install -r requirements.txt; else pip install requests playwright; fi
-
-    - name: 安装 Playwright 浏览器内核
-      run: playwright install chromium
-
-    - name: 运行阅读脚本
+        pip install requests playwright
+        playwright install chromium
+    - name: 运行脚本
       env:
         DXY_COOKIE: ${{ secrets.DXY_COOKIE }} 
       run: python dxy_read.py
